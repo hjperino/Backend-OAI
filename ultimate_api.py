@@ -409,8 +409,6 @@ async def ask_question(request: QuestionRequest):
         else:
             raise HTTPException(status_code=500, detail=str(e))
 
-# Serve static files
-app.mount("/static", StaticFiles(directory="frontend"), name="static")
 
 if __name__ == "__main__":
     print("\n🚀 Starting Ultimate DLH Chatbot API server...")
