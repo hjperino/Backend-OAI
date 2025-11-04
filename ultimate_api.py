@@ -501,6 +501,8 @@ async def health_check():
 @app.post("/ask", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
     """Beantworte Fragen mit optimaler Kontext-Verarbeitung und Event-Sortierung"""
+    relevant_chunks = []  # Initialize to avoid UnboundLocalError
+    
     try:
         # Analysiere Intent
         intent = extract_query_intent(request.question)
@@ -584,7 +586,7 @@ async def ask_question(request: QuestionRequest):
 if __name__ == "__main__":
     print("\n🚀 Starting Ultimate DLH Chatbot API server (IMPROVED VERSION)...")
     print("📝 API documentation: http://localhost:8000/docs")
-    print("🌐 Frontend hosted at: https://perino.info/dlh-chatbot")
+   print("🌐 Frontend hosted at: https://perino.info/dlh-chatbot")
     print(f"📚 Loaded {len(CHUNKS)} chunks")
     print(f"🔍 Indexed {len(KEYWORD_INDEX)} keywords")
     print("✨ NEW: Chronological event sorting with past/future separation!")
