@@ -586,7 +586,7 @@ async def ask_question(request: QuestionRequest):
 if __name__ == "__main__":
     print("\n🚀 Starting Ultimate DLH Chatbot API server (IMPROVED VERSION)...")
     print("📝 API documentation: http://localhost:8000/docs")
-   print("🌐 Frontend hosted at: https://perino.info/dlh-chatbot")
+    print("🌐 Frontend hosted at: https://perino.info/dlh-chatbot")
     print(f"📚 Loaded {len(CHUNKS)} chunks")
     print(f"🔍 Indexed {len(KEYWORD_INDEX)} keywords")
     print("✨ NEW: Chronological event sorting with past/future separation!")
