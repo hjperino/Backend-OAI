@@ -216,7 +216,8 @@ def extract_query_intent(query: str) -> Dict[str, any]:
         'is_definition': any(term in query_lower for term in ['was ist', 'was sind', 'definition', 'bedeutung']),
         'wants_list': any(term in query_lower for term in ['welche', 'liste', 'alle', 'überblick', 'übersicht']),
         'wants_contact': any(term in query_lower for term in ['kontakt', 'anmeldung', 'email', 'telefon', 'anmelden']),
-        'topic_keywords': []
+        'topic_keywords': [],
+        'is_impulsworkshop_query': 'impulsworkshop' in query_lower or 'impuls-workshop' in query_lower  # Spezielle Flag für Impulsworkshop-Anfragen
     }
     
     # Erweiterte Themenerkennung
@@ -287,6 +288,10 @@ def advanced_search(query: str, max_results: int = 8) -> List[Dict]:
         content_words = set(content_lower.split())
         matching_words = query_words & content_words
         score += len(matching_words) * 5
+        
+        # Spezial-Bonus für Impulsworkshop-Anfragen
+        if intent.get('is_impulsworkshop_query') and 'inputorientiert' in content_lower:
+            score += 50  # Sehr hoher Bonus für Chunks mit der Impuls-Workshop Kategorie
         
         # Intent-basiertes Scoring
         if intent['is_date_query'] and any(d in content_lower for d in ['2024', '2025', '2026', 'uhr', 'datum', 'termin']):
