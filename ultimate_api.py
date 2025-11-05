@@ -466,7 +466,7 @@ def advanced_search(query: str, max_results: int = 10) -> List[Dict]:
     return final_results
 
 def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> str:
-    """Erstelle optimierten Prompt mit speziellen Anweisungen"""
+    """Erstelle optimierten Prompt mit KLAREN, KURZEN Anweisungen"""
     
     current_date = datetime.now()
     current_date_str = current_date.strftime('%d.%m.%Y')
@@ -523,97 +523,48 @@ def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> s
         
         context = "\n".join(context_parts)
     
-    # Intent-spezifische Anweisungen
-    intent_instructions = ""
-    
-    # Spezielle Anweisungen für Innovationsfonds-Projektanfragen
+    # KOMPAKTE Anweisungen - nur für Innovationsfonds
     if intent['is_innovationsfonds_query']:
-        intent_instructions += """
-🎯 INNOVATIONSFONDS-PROJEKTE - WICHTIGE FORMATIERUNGSREGELN:
+        prompt = f"""Du bist der DLH Chatbot. Beantworte auf Deutsch mit HTML-Formatierung.
 
-1. PROJEKTTITEL UND LINKS:
-   - Zeige JEDES Projekt als separate Überschrift mit klickbarem Link
-   - Format: <strong><a href="VOLLSTÄNDIGE-URL" target="_blank">Projekttitel</a></strong>
-   - Die URL steht nach "URL:" im Kontext
-   
-2. PROJEKTBESCHREIBUNG:
-   - Gib eine kurze, prägnante Beschreibung (1-2 Sätze) unter jedem Projekttitel
-   - Verwende <br><br> zwischen Projekten für gute Lesbarkeit
-   
-3. BEISPIEL FÜR PERFEKTE FORMATIERUNG:
-   <strong>Innovationsfonds-Projekte in Chemie:</strong><br><br>
-   
-   <strong><a href="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/428-digitales-leitprogramm-saeuren-und-basen" target="_blank">Digitales Leitprogramm Säuren und Basen</a></strong><br>
-   Bewährte Leitprogramm-Methode für digitale Medien mit interaktiven Elementen und automatischer Rückmeldung für selbständiges Lernen<br><br>
-   
-   <strong><a href="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/425-salze-metalle-stoechiometrie" target="_blank">Salze-Metalle-Stöchiometrie</a></strong><br>
-   Interaktives Projekt zum Erlernen von chemischen Grundkonzepten mit praktischen Übungen<br><br>
+KRITISCH - PROJEKTTITEL MÜSSEN KLICKBARE LINKS SEIN:
+Jeder Projekttitel MUSS so formatiert werden:
+<strong><a href="VOLLSTÄNDIGE-URL" target="_blank">Projekttitel</a></strong><br>
+Kurze Beschreibung des Projekts<br><br>
 
-4. WICHTIG:
-   - JEDES Projekt MUSS einen klickbaren Link haben
-   - Verwende die VOLLSTÄNDIGE URL aus dem Kontext
-   - Liste ALLE gefundenen Projekte auf
-   - Füge am Ende KEINE generischen Listen ohne Links hinzu
-"""
-    
-    if intent['is_date_query']:
-        intent_instructions += f"""
-TERMINE UND VERANSTALTUNGEN:
-- Heutiges Datum: {current_date_str}
-- Die Events sind chronologisch sortiert
-- Formatierung: <br>• <strong>DD.MM.YYYY (Wochentag)</strong> - Uhrzeit - Titel
-- Markiere vergangene Events: <em>(bereits vorbei)</em>
-- Zeige Anmeldelinks: <a href="URL" target="_blank">Hier anmelden</a>
-"""
-    
-    if intent['wants_list']:
-        intent_instructions += """
-LISTEN UND ÜBERSICHTEN:
-- Vollständige, strukturierte Listen
-- <strong>Überschriften</strong> für Kategorien
-- <br>• für Hauptpunkte
-- <br>&nbsp;&nbsp;→ für Unterpunkte
-- ALLE gefundenen Elemente zeigen
-"""
-    
-    if intent['wants_contact']:
-        intent_instructions += """
-KONTAKT UND ANMELDUNG:
-- Alle Kontaktinformationen angeben
-- Links: <a href="URL" target="_blank">Linktext</a>
-- E-Mails: <a href="mailto:email@domain.ch">email@domain.ch</a>
-- Telefon: <strong>Tel: +41 XX XXX XX XX</strong>
-"""
-    
-    prompt = f"""Du bist der offizielle KI-Assistent des Digital Learning Hub (DLH) Zürich.
-Beantworte die folgende Frage präzise und vollständig basierend auf den bereitgestellten Informationen.
+BEISPIEL (genau so machen!):
+<strong><a href="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/428-digitales-leitprogramm-saeuren-und-basen" target="_blank">Digitales Leitprogramm Säuren und Basen</a></strong><br>
+Leitprogramm-Methode mit interaktiven Elementen<br><br>
 
-WICHTIGE REGELN:
-1. Verwende NUR Informationen aus dem bereitgestellten Kontext
-2. Sei spezifisch und vollständig - liste ALLE relevanten Informationen auf
-3. Wenn etwas nicht im Kontext steht, sage das klar
-4. Bei Innovationsfonds-Projekten: JEDES Projekt muss einen klickbaren Link haben!
-5. Verweise bei Bedarf auf die DLH-Website für weitere Informationen
+HTML-Tags verwenden:
+- <br> für Zeilenumbruch
+- <br><br> zwischen Projekten
+- <strong> für Überschriften
+- <a href="URL" target="_blank"> für Links
+- KEINE Markdown (*, #, _)
 
-FORMATIERUNG (SEHR WICHTIG für HTML-Darstellung):
-- Verwende KEINE Markdown-Zeichen (*, #, _, -)
-- Verwende <br><br> für Absätze zwischen Abschnitten
-- Verwende <br> für Zeilenumbrüche innerhalb von Listen
-- Verwende <strong>Text</strong> für Überschriften und wichtige Begriffe
-- Verwende <em>Text</em> für Hervorhebungen
-- Strukturiere Listen mit <br>• für Hauptpunkte
-- Verwende <br>&nbsp;&nbsp;→ für Unterpunkte
-- Mache URLs klickbar: <a href="URL" target="_blank">Linktext</a>
-- E-Mails: <a href="mailto:email@domain.ch">email@domain.ch</a>
-
-{intent_instructions}
-
-KONTEXT AUS DER DLH-WEBSITE:
+KONTEXT:
 {context}
 
 FRAGE: {question}
 
-Erstelle eine hilfreiche, gut strukturierte und vollständige Antwort mit perfekter HTML-Formatierung:"""
+Antworte jetzt mit KLICKBAREN Links für alle Projekte:"""
+    else:
+        # Kürzerer Prompt für nicht-Projekt-Anfragen
+        prompt = f"""Du bist der DLH Chatbot. Beantworte auf Deutsch mit HTML-Formatierung.
+
+HTML-Tags verwenden:
+- <br> für Zeilenumbruch
+- <strong> für wichtige Begriffe
+- <a href="URL" target="_blank"> für Links
+- KEINE Markdown (*, #, _)
+
+KONTEXT:
+{context}
+
+FRAGE: {question}
+
+Antworte jetzt:"""
     
     return prompt
 
