@@ -26,9 +26,9 @@ load_dotenv()
 
 # Initialize FastAPI app
 app = FastAPI(
-    title="DLH Chatbot API (Final Optimized)",
-    description="AI-powered chatbot für dlh.zh.ch - optimiert für Events & Innovationsfonds",
-    version="3.5.0"
+    title="DLH Chatbot API (System Prompt Version)",
+    description="AI-powered chatbot für dlh.zh.ch - mit System Prompt für garantierte Links",
+    version="3.6.0"
 )
 
 # Configure CORS
@@ -437,18 +437,22 @@ def advanced_search(query: str, max_results: int = 10) -> List[Dict]:
     if results:
         print(f"   Top 5 scores: {[r[0] for r in results[:5]]}")
     
-    # Diversifiziere Ergebnisse
+    # VERBESSERTE Deduplizierung - URL-basiert für Innovationsfonds-Projekte
     final_results = []
+    seen_urls = set()
     url_count = Counter()
     
     for score, chunk in results:
         url = chunk['metadata'].get('source', '')
-        # Für Innovationsfonds-Projektseiten: jedes Projekt einzeln
+        
+        # Für Innovationsfonds-Projektseiten: nur EINMAL pro URL (keine Duplikate!)
         is_project_page = 'projektvorstellungen' in url.lower() and 'uebersicht' in url.lower() and any(char.isdigit() for char in url.split('/')[-1])
         
         if is_project_page:
-            # Jedes Projekt einzeln (keine Limit pro URL)
-            final_results.append(chunk)
+            # Prüfe ob wir diese URL schon haben
+            if url not in seen_urls:
+                final_results.append(chunk)
+                seen_urls.add(url)
         else:
             # Normale Seiten: max 2 pro URL
             if url_count[url] < 2:
@@ -507,7 +511,7 @@ def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> s
         
         context = "\n".join(context_parts)
     else:
-        # Standard-Gruppierung - JEDES Projekt einzeln!
+        # Standard-Gruppierung - JEDES Projekt einzeln mit URL!
         context_parts = []
         for chunk in chunks:
             url = chunk['metadata'].get('source', 'Unbekannt')
@@ -518,65 +522,39 @@ def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> s
             context_parts.append(f"URL: {url}")
             if faecher:
                 context_parts.append(f"Fächer: {', '.join(faecher)}")
-            context_parts.append(chunk['content'])
+            # Nur erste 400 Zeichen - spart Token und erhält Fokus
+            content_preview = chunk['content'][:400]
+            context_parts.append(content_preview)
             context_parts.append("---\n")
         
         context = "\n".join(context_parts)
     
-    # KOMPAKTE Anweisungen - nur für Innovationsfonds
+    # KOMPAKTER User-Prompt - Formatierung ist im System Prompt!
     if intent['is_innovationsfonds_query']:
-        prompt = f"""Du bist der DLH Chatbot. Beantworte auf Deutsch mit HTML-Formatierung.
-
-KRITISCH - PROJEKTTITEL MÜSSEN KLICKBARE LINKS SEIN:
-Jeder Projekttitel MUSS so formatiert werden:
-<strong><a href="VOLLSTÄNDIGE-URL" target="_blank">Projekttitel</a></strong><br>
-Kurze Beschreibung des Projekts<br><br>
-
-BEISPIEL (genau so machen!):
-<strong><a href="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/428-digitales-leitprogramm-saeuren-und-basen" target="_blank">Digitales Leitprogramm Säuren und Basen</a></strong><br>
-Leitprogramm-Methode mit interaktiven Elementen<br><br>
-
-HTML-Tags verwenden:
-- <br> für Zeilenumbruch
-- <br><br> zwischen Projekten
-- <strong> für Überschriften
-- <a href="URL" target="_blank"> für Links
-- KEINE Markdown (*, #, _)
-
-KONTEXT:
+        prompt = f"""KONTEXT (Innovationsfonds-Projekte mit URLs):
 {context}
 
 FRAGE: {question}
 
-Antworte jetzt mit KLICKBAREN Links für alle Projekte:"""
+Zeige ALLE Projekte mit klickbaren Links (Format siehe System-Prompt)."""
     else:
         # Kürzerer Prompt für nicht-Projekt-Anfragen
-        prompt = f"""Du bist der DLH Chatbot. Beantworte auf Deutsch mit HTML-Formatierung.
-
-HTML-Tags verwenden:
-- <br> für Zeilenumbruch
-- <strong> für wichtige Begriffe
-- <a href="URL" target="_blank"> für Links
-- KEINE Markdown (*, #, _)
-
-KONTEXT:
+        prompt = f"""KONTEXT:
 {context}
 
-FRAGE: {question}
-
-Antworte jetzt:"""
+FRAGE: {question}"""
     
     return prompt
 
 @app.get("/")
 async def root():
     return {
-        "message": "DLH Chatbot API (Final Optimized)",
+        "message": "DLH Chatbot API (System Prompt Version)",
         "status": "running" if len(CHUNKS) > 0 else "ERROR: No data loaded!",
         "chunks_loaded": len(CHUNKS),
         "indexed_keywords": len(KEYWORD_INDEX),
         "indexed_subjects": len(SUBJECT_INDEX),
-        "version": "3.5.0"
+        "version": "3.6.0"
     }
 
 @app.get("/health")
@@ -590,7 +568,7 @@ async def health_check():
         "indexed_keywords": len(KEYWORD_INDEX),
         "indexed_subjects": len(SUBJECT_INDEX),
         "subjects_available": list(SUBJECT_INDEX.keys()) if SUBJECT_INDEX else [],
-        "features": "Metadata subject search + Date extraction + Project links"
+        "features": "System Prompt + URL deduplication + Sonnet 4.5"
     }
 
 @app.post("/ask", response_model=AnswerResponse)
@@ -633,10 +611,31 @@ async def ask_question(request: QuestionRequest):
         
         # Get response from Claude
         try:
+            # SYSTEM PROMPT für unvergessliche Formatierungsregeln
+            system_prompt = """Du bist der offizielle DLH Chatbot. Antworte auf Deutsch mit HTML-Formatierung.
+
+KRITISCHE REGEL - PROJEKTTITEL MÜSSEN IMMER KLICKBARE LINKS SEIN:
+Für Innovationsfonds-Projekte gilt: JEDER Projekttitel MUSS als klickbarer Link formatiert werden.
+
+Format: <strong><a href="VOLLSTÄNDIGE-URL" target="_blank">Projekttitel</a></strong><br>
+Beschreibung in 1-2 Sätzen<br><br>
+
+HTML-Tags:
+- <br> = Zeilenumbruch
+- <br><br> = Absatz zwischen Projekten  
+- <strong> = Überschriften
+- <a href="URL" target="_blank"> = Links
+- NIEMALS Markdown (*, #, _)
+
+BEISPIEL:
+<strong><a href="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/1042-histoswiss" target="_blank">HistoSwiss</a></strong><br>
+Interdisziplinäres Geschichtsprojekt mit digitalen Werkzeugen<br><br>"""
+
             response = anthropic_client.messages.create(
                 model="claude-sonnet-4-5-20250929",  # Sonnet 4.5 - bestes Modell!
-                max_tokens=2500,  # Erhöht für mehr Projekte
+                max_tokens=2500,
                 temperature=0.3,
+                system=system_prompt,  # SYSTEM PROMPT!
                 messages=[{
                     "role": "user",
                     "content": prompt
@@ -719,18 +718,19 @@ except Exception as e:
     print(f"Warning: Could not mount static files: {e}")
 
 if __name__ == "__main__":
-    print("\n🚀 Starting DLH Chatbot API server (FINAL OPTIMIZED VERSION)...")
+    print("\n🚀 Starting DLH Chatbot API server (SYSTEM PROMPT VERSION)...")
     print("📖 API documentation: http://localhost:8000/docs")
     print("🌐 Chat interface: http://localhost:8000/static/index.html")
     print(f"📚 Loaded {len(CHUNKS)} chunks")
     print(f"🔍 Indexed {len(KEYWORD_INDEX)} keywords")
     print(f"📚 Indexed {len(SUBJECT_INDEX)} subjects in metadata")
     if SUBJECT_INDEX:
-        print(f"   Subjects: {', '.join(SUBJECT_INDEX.keys())}")
+        print(f"   Subjects: {', '.join(list(SUBJECT_INDEX.keys())[:10])}...")
     print("✨ Features:")
-    print("   - Metadata subject search (fächer field)")
-    print("   - Enhanced date extraction")
-    print("   - Guaranteed project links")
+    print("   - System Prompt für garantierte Link-Formatierung")
+    print("   - URL-basierte Deduplizierung (keine Duplikate!)")
+    print("   - Sonnet 4.5 (bestes Modell)")
+    print("   - Metadata subject search")
     print("\n✅ All features enabled!\n")
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
