@@ -43,7 +43,7 @@ anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 def load_and_preprocess_data():
     """Lade und bereite Daten mit verbesserter Struktur vor"""
     try:
-        with open('data/processed/processed_chunks.json', 'r', encoding='utf-8') as f:
+        with open('processed/processed_chunks.json', 'r', encoding='utf-8') as f:
             chunks = json.load(f)
         
         # Erstelle Index für schnellere Suche
