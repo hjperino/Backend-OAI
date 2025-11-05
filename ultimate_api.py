@@ -329,7 +329,7 @@ def advanced_search(query: str, max_results: int = 10) -> List[Dict]:
                 for idx in URL_INDEX[overview_url][:2]:
                     if idx < len(CHUNKS):
                         results.append((150, CHUNKS[idx]))
-                        print(f"   âœ" Added overview {overview_url} with score 150")
+                        print(f"   + Added overview {overview_url} with score 150")
     
     # PRIORITÃ„T 2: Metadaten-basierte Fachsuche fÃ¼r Innovationsfonds (Score 200)
     if intent['is_innovationsfonds_query'] and intent['subject_keywords']:
