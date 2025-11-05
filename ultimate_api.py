@@ -224,8 +224,30 @@ def sort_events_chronologically(chunks: List[Dict], current_date: datetime = Non
     }
 
 def extract_query_intent(query: str) -> Dict[str, any]:
-    """ENHANCED: Analysiere die Absicht mit besserer Innovationsfonds-Erkennung"""
+    """ENHANCED: Analysiere die Absicht mit besserer Innovationsfonds-Erkennung und mehr Begriffsvarianten"""
     query_lower = query.lower()
+    
+    # ERWEITERT: Mehr Varianten für Innovationsfonds/Projekt-Erkennung
+    innovationsfonds_terms = [
+        'innovationsfonds',
+        'innovationsprojekt',
+        'innovationsprojekte',
+        'innovations projekt',
+        'innovations projekte',
+        'innovation projekt',
+        'innovation projekte',
+        'innovatives projekt',
+        'innovative projekte',
+        'projekte für',
+        'projekt für',
+        'projekte im',
+        'projekt im',
+        'projekte zum',
+        'projekt zum',
+        'projekte',
+        'welche projekte',
+        'welche projekt'
+    ]
     
     intent = {
         'is_date_query': any(term in query_lower for term in ['heute', 'morgen', 'termin', 'wann', 'datum', 'zeit', 'event', 'veranstaltung', 'nächste', 'kommende']),
@@ -233,8 +255,8 @@ def extract_query_intent(query: str) -> Dict[str, any]:
         'is_definition': any(term in query_lower for term in ['was ist', 'was sind', 'definition', 'bedeutung']),
         'wants_list': any(term in query_lower for term in ['welche', 'liste', 'alle', 'überblick', 'übersicht']),
         'wants_contact': any(term in query_lower for term in ['kontakt', 'anmeldung', 'email', 'telefon', 'anmelden']),
-        # NEW: Innovationsfonds-Projekt-Erkennung
-        'is_innovationsfonds_query': any(term in query_lower for term in ['innovationsfonds', 'projekte', 'projekt für']),
+        # NEW: Erweiterte Innovationsfonds-Projekt-Erkennung
+        'is_innovationsfonds_query': any(term in query_lower for term in innovationsfonds_terms),
         'topic_keywords': []
     }
     
@@ -562,16 +584,43 @@ async def health_check():
 
 @app.post("/ask", response_model=AnswerResponse)
 async def ask_question(request: QuestionRequest):
-    """Beantworte Fragen mit optimaler Innovationsfonds-Projekterkennung"""
+    """Beantworte Fragen mit optimaler Innovationsfonds-Projekterkennung und Debug-Ausgabe"""
     try:
         # Analysiere Intent
         intent = extract_query_intent(request.question)
+        
+        # DEBUG OUTPUT
+        print(f"\n{'='*60}")
+        print(f"🔍 DEBUG - Query Analysis")
+        print(f"{'='*60}")
+        print(f"Question: {request.question}")
+        print(f"is_innovationsfonds_query: {intent['is_innovationsfonds_query']}")
+        print(f"topic_keywords: {intent['topic_keywords']}")
+        print(f"{'='*60}\n")
         
         # Führe erweiterte Suche durch
         relevant_chunks = advanced_search(
             request.question, 
             max_results=request.max_sources + 5  # Mehr für Innovationsfonds-Projekte
         )
+        
+        # DEBUG OUTPUT
+        print(f"🔍 DEBUG - Search Results:")
+        print(f"   Total chunks found: {len(relevant_chunks)}")
+        projekt_urls = [c['metadata'].get('source', '') 
+                        for c in relevant_chunks 
+                        if 'projektvorstellungen' in c['metadata'].get('source', '').lower()]
+        print(f"   Projektvorstellungen URLs: {len(projekt_urls)}")
+        if projekt_urls:
+            print(f"   Sample URLs:")
+            for url in projekt_urls[:3]:
+                print(f"      - {url}")
+        else:
+            print(f"   ⚠️  NO projektvorstellungen URLs found!")
+            print(f"   Sample of found URLs:")
+            for chunk in relevant_chunks[:3]:
+                print(f"      - {chunk['metadata'].get('source', 'No URL')}")
+        print(f"{'='*60}\n")
         
         # Erstelle optimierten Prompt
         prompt = create_enhanced_prompt(request.question, relevant_chunks, intent)
