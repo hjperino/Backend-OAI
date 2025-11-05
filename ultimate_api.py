@@ -634,7 +634,7 @@ async def ask_question(request: QuestionRequest):
         # Get response from Claude
         try:
             response = anthropic_client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-5-20250929",  # Sonnet 4.5 - bestes Modell!
                 max_tokens=2500,  # Erhöht für mehr Projekte
                 temperature=0.3,
                 messages=[{
