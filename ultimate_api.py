@@ -699,3 +699,71 @@ if __name__ == "__main__":
     print("\n ALL FEATURES ENABLED!\n")
     
     uvicorn.run(app, host="0.0.0.0", port=8000)
+
+
+# --- fix: ensure fetch_live_innovationsfonds is defined ---
+def fetch_live_innovationsfonds(subject: Optional[str] = None) -> Optional[Dict]:
+    """Fetch live Innovationsfonds project list (optionally filtered by subject) and format as HTML list."""
+    try:
+        base = "https://dlh.zh.ch"
+        if subject:
+            subject_slug_map = {
+                'chemie': 'chemie',
+                'physik': 'physik',
+                'biologie': 'biologie',
+                'mathematik': 'mathematik',
+                'informatik': 'informatik',
+                'deutsch': 'deutsch',
+                'englisch': 'englisch',
+                'franzoesisch': 'franzoesisch',
+                'italienisch': 'italienisch',
+                'spanisch': 'spanisch',
+                'geschichte': 'geschichte',
+                'geografie': 'geografie',
+                'wirtschaft': 'wirtschaft',
+                'recht': 'recht',
+                'philosophie': 'philosophie'
+            }
+            key = (subject or '').lower()
+            slug = subject_slug_map.get(key, key)
+            url = f"{base}/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{slug}"
+        else:
+            url = f"{base}/home/innovationsfonds/projektvorstellungen/uebersicht"
+        print(f"LIVE FETCH: Innovationsfonds projects for subject='{subject or 'overview'}' from {url}")
+        r = requests.get(url, timeout=10, headers={"User-Agent": "DLH-Chatbot/1.0"})
+        r.raise_for_status()
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(r.text, "html.parser")
+        candidates = soup.select("article a, .card a, .teaser a, li a")
+        projects = []
+        for a in candidates:
+            href = a.get("href")
+            title = a.get_text(strip=True)
+            if not href or not title:
+                continue
+            full = href if href.startswith("http") else base + href
+            if "/innovationsfonds/" in full and "/tags/" not in full and "/uebersicht" not in full:
+                projects.append({"title": title, "url": full})
+            if len(projects) >= 12:
+                break
+        if not projects:
+            print("LIVE FETCH: No project cards detected on the page")
+            return None
+        out = ["<ul>"]
+        for p in projects:
+            out.append(f'<li><a href="{p["url"]}" target="_blank" rel="noopener">{p["title"]}</a></li>')
+        out.append("</ul>")
+        content = "\\n".join(out)
+        print(f"LIVE FETCH SUCCESS: Compiled {len(projects)} projects into HTML list")
+        return {
+            "content": content,
+            "metadata": {
+                "source": url,
+                "title": f"Innovationsfonds Projekte - {subject or 'Uebersicht'} (LIVE)",
+                "fetched_live": True
+            }
+        }
+    except Exception as e:
+        print("LIVE FETCH FAILED (Innovationsfonds):", e)
+        return None
+
