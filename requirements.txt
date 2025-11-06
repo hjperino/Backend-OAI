@@ -1,9 +1,11 @@
 fastapi==0.104.1
 uvicorn==0.24.0
 pydantic>=2.5,<3
-# if you use BaseSettings anywhere, also add:
+# Only if you actually use BaseSettings:
 # pydantic-settings>=2.0,<3
-python-dotenv==1.0.0
-requests==2.31.0
-beautifulsoup4==4.12.2
+
 anthropic==0.39.0
+httpx==0.27.2          # pin to avoid 'proxies' kw breakage
+python-dotenv==1.0.0
+requests>=2.31,<3
+beautifulsoup4==4.12.2
