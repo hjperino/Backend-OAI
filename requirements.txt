@@ -1,7 +1,8 @@
 fastapi==0.104.1
 uvicorn==0.24.0
-anthropic==0.39.0
+pydantic==2.6.4        # or any recent 2.x
+pydantic-settings==2.2.1
 python-dotenv==1.0.0
-pydantic==1.10.13
 requests==2.31.0
 beautifulsoup4==4.12.2
+anthropic==0.39.0
