@@ -16,10 +16,18 @@ import json
 import os
 import re
 import uvicorn
+import logging
 from anthropic import Anthropic
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from collections import Counter
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger(__name__)
 
 # Load environment variables
 load_dotenv()
