@@ -29,10 +29,18 @@ openai_client = OpenAI(
 app = FastAPI(title="DLH Chatbot API (OpenAI)")
 
 # CORS for browser frontend
+from fastapi.middleware.cors import CORSMiddleware
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=False,
+    allow_origins=[
+        "https://perino.info",
+        "https://www.perino.info",
+        "https://dlh-chatbot-api-openai.onrender.com",  # schadet nicht
+        "*"  # als Fallback
+    ],
+    allow_origin_regex=r".*",          # akzeptiert alle Origins (sicher ok ohne Credentials)
+    allow_credentials=False,           # bleibt False, damit "*" gültig ist
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
