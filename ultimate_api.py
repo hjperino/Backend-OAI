@@ -29,19 +29,11 @@ openai_client = OpenAI(
 app = FastAPI(title="DLH Chatbot API (OpenAI)")
 
 # CORS for browser frontend
-from fastapi.middleware.cors import CORSMiddleware
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://perino.info",
-        "https://www.perino.info",
-        "https://dlh-chatbot-api-openai.onrender.com",  # schadet nicht
-        "*"  # als Fallback
-    ],
-    allow_origin_regex=r".*",          # akzeptiert alle Origins (sicher ok ohne Credentials)
-    allow_credentials=False,           # bleibt False, damit "*" gültig ist
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_origins=["https://perino.info","https://www.perino.info"],
+    allow_credentials=True,
+    allow_methods=["GET","POST","OPTIONS"],
     allow_headers=["*"],
 )
 
@@ -388,15 +380,16 @@ def build_user_prompt(question: str, ranked_chunks: List[Tuple[int, Dict]]) -> s
 # -----------------------------
 # LLM call
 # -----------------------------
-def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200, temperature: float = 0.2) -> str:
+def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> str:
+    """Sendet eine Chat-Anfrage an das OpenAI-Modell (GPT-5-kompatibel)."""
     resp = openai_client.chat.completions.create(
         model=OPENAI_MODEL,
         messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_completion_tokens=max_tokens,   # <-- neue Schreibweise
-        temperature=temperature,
+        max_completion_tokens=max_tokens,   # ✅ neuer Parametername
+        # kein temperature-Feld – Modell akzeptiert nur Default (1.0)
     )
     return resp.choices[0].message.content.strip()
 
@@ -429,19 +422,211 @@ def health():
 @app.get("/version")
 def version():
     return {"version": "openai-backend", "model": OPENAI_MODEL}
+    
+@app.get("/")
+def root():
+    return {
+        "ok": True,
+        "service": "DLH OpenAI API",
+        "endpoints": ["/health", "/ask", "/version"]    
 
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     ranked = advanced_search(req.question, max_items=req.max_sources or 8)
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(req.question, ranked)
-    answer = call_openai(system_prompt, user_prompt, max_tokens=1200, temperature=0.2)
+    answer = call_openai(system_prompt, user_prompt, max_completion_tokens=1200
     sources = build_sources(ranked, limit=req.max_sources or 3)
     return AnswerResponse(answer=answer, sources=sources)
 
 # -----------------------------
 # Local dev
 # -----------------------------
+
+
+# === Functions carried over from old live_patch2_fix (needed) ===
+
+def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> str:
+    """Erstelle Prompt - Formatierung ist im System Prompt"""
+    
+    current_date = datetime.now()
+    current_date_str = current_date.strftime('%d.%m.%Y')
+    
+    # Event-Sortierung von gestern!
+    if intent['is_date_query'] or any(keyword in ['workshop', 'veranstaltung'] for keyword in intent['topic_keywords']):
+        sorted_events = sort_events_chronologically(chunks, current_date)
+        
+        context_parts = []
+        
+        if sorted_events['future_events']:
+            context_parts.append("=== KOMMENDE VERANSTALTUNGEN (chronologisch sortiert) ===")
+            for event in sorted_events['future_events']:
+                days_until = (event['date'].date() - current_date.date()).days
+                context_parts.append(f"\nY... DATUM: {event['date'].strftime('%d.%m.%Y (%A)')} (in {days_until} Tagen)")
+                context_parts.append(f"Titel: {event['chunk']['metadata'].get('title', 'Unbekannt')}")
+                context_parts.append(f"Quelle: {event['chunk']['metadata'].get('source', 'Unbekannt')}")
+                context_parts.append(event['chunk']['content'][:400])
+                context_parts.append("---")
+        
+        if sorted_events['past_events']:
+            context_parts.append("\n\n=== VERGANGENE VERANSTALTUNGEN ===")
+            for event in sorted_events['past_events'][:5]:
+                days_ago = (current_date.date() - event['date'].date()).days
+                context_parts.append(f"\nY... DATUM: {event['date'].strftime('%d.%m.%Y (%A)')} (vor {days_ago} Tagen - BEREITS VORBEI)")
+                context_parts.append(f"Titel: {event['chunk']['metadata'].get('title', 'Unbekannt')}")
+                context_parts.append(f"Quelle: {event['chunk']['metadata'].get('source', 'Unbekannt')}")
+                context_parts.append(event['chunk']['content'][:400])
+                context_parts.append("---")
+        
+        if sorted_events['no_date_events']:
+            context_parts.append("\n\n=== WEITERE INFORMATIONEN ===")
+            for item in sorted_events['no_date_events']:
+                context_parts.append(f"\nTitel: {item['chunk']['metadata'].get('title', 'Unbekannt')}")
+                context_parts.append(f"Quelle: {item['chunk']['metadata'].get('source', 'Unbekannt')}")
+                context_parts.append(item['chunk']['content'][:400])
+                context_parts.append("---")
+        
+        context = "\n".join(context_parts)
+        
+        prompt = f"""Heutiges Datum: {current_date_str}
+
+def extract_dates_from_text(text: str) -> List[Tuple[datetime, str]]:
+    """Extrahiere Daten aus Text - unterstA14tzt auch abgekA14rzte Monatsnamen"""
+    dates_found = []
+    
+    month_map_full = {
+        'januar': 1, 'februar': 2, 'maerz': 3, 'april': 4,
+        'mai': 5, 'juni': 6, 'juli': 7, 'august': 8,
+        'september': 9, 'oktober': 10, 'november': 11, 'dezember': 12
+    }
+    
+    month_map_abbr = {
+        'jan': 1, 'feb': 2, 'mAr': 3, 'maerz': 3, 'mrz': 3, 'apr': 4,
+        'mai': 5, 'jun': 6, 'jul': 7, 'aug': 8,
+        'sep': 9, 'sept': 9, 'okt': 10, 'nov': 11, 'dez': 12
+    }
+    
+    patterns = [
+        (r'(\d{1,2})\.(\d{1,2})\.(\d{2,4})', 'numeric'),
+        (r'(\d{1,2})\.\s*(Januar|Februar|Maerz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s*(\d{4})', 'full_month'),
+        (r'(\d{1,2})\.?\s+(Jan\.?|Feb\.?|MAr\.?|Maerz\.?|Mrz\.?|Apr\.?|Mai\.?|Jun\.?|Jul\.?|Aug\.?|Sep\.?|Sept\.?|Okt\.?|Nov\.?|Dez\.?)\s+(\d{4})', 'abbr_month'),
+    ]
+    
+    # Pattern 1: DD.MM.YYYY
+    for match in re.finditer(patterns[0][0], text):
+        try:
+            day = int(match.group(1))
+            month = int(match.group(2))
+            year_str = match.group(3)
+            year = int(year_str) if len(year_str) == 4 else (2000 + int(year_str))
+            
+            date_obj = datetime(year, month, day)
+            start = max(0, match.start() - 100)
+            end = min(len(text), match.end() + 100)
+            context = text[start:end].strip()
+            
+            dates_found.append((date_obj, context, match.group(0)))
+        except ValueError:
+            continue
+    
+    # Pattern 2: DD. Monat YYYY
+    for match in re.finditer(patterns[1][0], text, re.IGNORECASE):
+        try:
+            day = int(match.group(1))
+            month_name = match.group(2).lower()
+            month = month_map_full.get(month_name)
+            year = int(match.group(3))
+            
+            if month:
+                date_obj = datetime(year, month, day)
+                start = max(0, match.start() - 100)
+                end = min(len(text), match.end() + 100)
+                context = text[start:end].strip()
+                
+                dates_found.append((date_obj, context, match.group(0)))
+        except ValueError:
+            continue
+    
+    # Pattern 3: DD Mon. YYYY (abbreviated)
+    for match in re.finditer(patterns[2][0], text, re.IGNORECASE):
+        try:
+            day = int(match.group(1))
+            month_abbr = match.group(2).lower().replace('.', '').strip()
+            month = month_map_abbr.get(month_abbr)
+            year = int(match.group(3))
+            
+            if month:
+                date_obj = datetime(year, month, day)
+                start = max(0, match.start() - 100)
+                end = min(len(text), match.end() + 100)
+                context = text[start:end].strip()
+                
+                dates_found.append((date_obj, context, match.group(0)))
+        except ValueError:
+            continue
+    
+    return dates_found
+
+def load_and_preprocess_data():
+    """Lade und bereite Daten mit verbesserter Struktur vor"""
+    try:
+        file_path = 'processed/processed_chunks.json'
+        
+        print(f"Y Attempting to load data from: {file_path}")
+        
+        with open(file_path, 'r', encoding='utf-8') as f:
+            chunks = json.load(f)
+        
+        print(f" Successfully loaded {len(chunks)} chunks from {file_path}")
+        
+        # Erstelle Index fuer schnellere Suche
+        keyword_index = {}
+        url_index = {}
+        subject_index = {}
+        
+        for i, chunk in enumerate(chunks):
+            # URL-basierter Index
+            url = chunk['metadata'].get('source', '').lower()
+            if url not in url_index:
+                url_index[url] = []
+            url_index[url].append(i)
+            
+            # FAcher-Index aus Metadaten
+            faecher = chunk['metadata'].get('faecher', [])
+            if faecher:
+                for fach in faecher:
+                    fach_lower = fach.lower()
+                    if fach_lower not in subject_index:
+                        subject_index[fach_lower] = []
+                    subject_index[fach_lower].append(i)
+            
+            # Keyword-Index
+            content = chunk['content'].lower()
+            important_terms = [
+                'fobizz', 'genki', 'innovationsfonds', 'cop', 'cops',
+                'vernetzung', 'workshop', 'weiterbildung', 'kuratiert',
+                'impuls', 'termin', 'anmeldung', 'lunch', 'learn',
+                'impuls-workshop', 'impulsworkshop', 'veranstaltung', 'event',
+                'chemie', 'physik', 'biologie', 'mathematik', 'informatik',
+                'deutsch', 'englisch', 'franzAsisch', 'italienisch', 'spanisch',
+                'geschichte', 'geografie', 'wirtschaft', 'recht', 'philosophie'
+            ]
+            
+            for term in important_terms:
+                if term in content:
+                    if term not in keyword_index:
+                        keyword_index[term] = []
+                    keyword_index[term].append(i)
+        
+        print(f"Y Indexed {len(keyword_index)} keywords")
+        print(f"Ys Indexed {len(subject_index)} subjects in metadata")
+        
+        return chunks, keyword_index, url_index, subject_index
+    except Exception as e:
+        print(f"a Error loading data: {e}")
+        import traceback
+        traceback.print_exc()
+        return [], {}, {}, {}
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
