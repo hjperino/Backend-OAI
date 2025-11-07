@@ -381,16 +381,16 @@ def build_user_prompt(question: str, ranked_chunks: List[Tuple[int, Dict]]) -> s
 # LLM call
 # -----------------------------
 def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> str:
-    """Sendet eine Chat-Anfrage an das OpenAI-Modell (GPT-5-kompatibel)."""
-    resp = openai_client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
+    payload = {
+        "model": OPENAI_MODEL,
+        "messages": [
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_completion_tokens=max_tokens,   # ✅ neuer Parametername
-        # kein temperature-Feld – Modell akzeptiert nur Default (1.0)
-    )
+        "max_completion_tokens": max_tokens,
+    }
+    # KEINE temperature/top_p/frequency_penalty übergeben – dein Modell unterstützt nur Defaults
+    resp = openai_client.chat.completions.create(**payload)
     return resp.choices[0].message.content.strip()
 
 # -----------------------------
