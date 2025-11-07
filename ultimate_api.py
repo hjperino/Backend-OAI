@@ -14,7 +14,36 @@ from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 from traceback import format_exc
+# --- Framework-Basis: FastAPI, Pydantic, CORS, Logging ---
+from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
+from traceback import format_exc
 
+app = FastAPI(title="DLH OpenAI API", version="1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # oder deine Domains
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# --- Pydantic-Modelle ---
+class SourceItem(BaseModel):
+    title: Optional[str] = None
+    url: Optional[str] = None
+    snippet: Optional[str] = None
+
+class AnswerResponse(BaseModel):
+    answer: str
+    sources: List[SourceItem] = []
+
+class QuestionRequest(BaseModel):
+    question: str
+    language: Optional[str] = "de"
+    max_sources: Optional[int] = 3
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
