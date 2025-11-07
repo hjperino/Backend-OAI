@@ -9,23 +9,22 @@ from pathlib import Path
 
 import requests
 from bs4 import BeautifulSoup
-from fastapi import FastAPI
-from pydantic import BaseModel
-from fastapi.middleware.cors import CORSMiddleware
-from openai import OpenAI
-from traceback import format_exc
+
 # --- Framework-Basis: FastAPI, Pydantic, CORS, Logging ---
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from traceback import format_exc
 
+# --- OpenAI Client ---
+from openai import OpenAI
+
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # oder deine Domains
-    allow_credentials=False,
+    allow_origins=["*"],            # oder: ["https://perino.info","https://www.perino.info"]
+    allow_credentials=False,        # bei "*" muss das False sein
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
@@ -44,67 +43,28 @@ class QuestionRequest(BaseModel):
     question: str
     language: Optional[str] = "de"
     max_sources: Optional[int] = 3
-@app.post("/ask", response_model=AnswerResponse)
-def ask(req: QuestionRequest):
-    try:
-        ranked = advanced_search(req.question, max_items=req.max_sources or 8)
-        system_prompt = build_system_prompt()
-        user_prompt = build_user_prompt(req.question, ranked)
 
-        print("Y  LLM call → model:", OPENAI_MODEL, "| prompt_len:", len(user_prompt))
-        answer = call_openai(system_prompt, user_prompt, max_tokens=1200)
-        print("Y  LLM OK")
-
-        sources = build_sources(ranked, limit=req.max_sources or 3)
-        return AnswerResponse(answer=answer, sources=sources)
-
-    except Exception as e:
-        # Vollständiges Traceback ins Render-Log:
-        print("ERROR in /ask:", repr(e))
-        print(format_exc())
-
-        # Nutzerfreundlicher Fallback – immer schema-konform:
-        msg = "<strong>Entschuldigung, es gab einen technischen Fehler.</strong><br>Bitte versuchen Sie es in Kürze erneut."
-        return AnswerResponse(answer=msg, sources=[])
-# -----------------------------
-# OpenAI client
-# -----------------------------
+# --- OpenAI Konfiguration (vor späterer /ask-Route) ---
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 openai_client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     organization=os.getenv("OPENAI_ORG_ID") or None,
 )
 
-# -----------------------------
-# FastAPI app
-# -----------------------------
-app = FastAPI(title="DLH Chatbot API (OpenAI)")
+# --- Komfort-Endpoints (optional, aber hilfreich) ---
+@app.get("/health")
+def health():
+    # falls du CHUNKS o.ä. nutzt, hier die realen Zahlen einsetzen
+    chunks_loaded = globals().get("CHUNKS_COUNT", 0)
+    return {"status": "healthy", "chunks_loaded": chunks_loaded, "model": OPENAI_MODEL}
 
-# CORS for browser frontend
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://perino.info","https://www.perino.info"],
-    allow_credentials=True,
-    allow_methods=["GET","POST","OPTIONS"],
-    allow_headers=["*"],
-)
+@app.get("/version")
+def version():
+    return {"version": "openai-backend", "model": OPENAI_MODEL}
 
-# -----------------------------
-# Models
-# -----------------------------
-class QuestionRequest(BaseModel):
-    question: str
-    language: Optional[str] = "de"
-    max_sources: Optional[int] = 8
-
-class Source(BaseModel):
-    url: str
-    title: str
-    snippet: str = ""
-
-class AnswerResponse(BaseModel):
-    answer: str
-    sources: List[Source] = []
+@app.api_route("/", methods=["GET", "HEAD"])
+def root():
+    return {"ok": True, "service": "DLH OpenAI API", "endpoints": ["/health", "/ask", "/version"]}
 
 # -----------------------------
 # Load processed chunks
