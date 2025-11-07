@@ -488,7 +488,11 @@ def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> s
         
         context = "\n".join(context_parts)
         
-        prompt = f"""Heutiges Datum: {current_date_str}
+       prompt = f"""
+Heutiges Datum: {current_date_str}
+Bitte beantworte die folgende Frage mit Bezug auf die gegebenen Daten.
+{user_input}
+"""
 
 def extract_dates_from_text(text: str) -> List[Tuple[datetime, str]]:
     """Extrahiere Daten aus Text - unterstA14tzt auch abgekA14rzte Monatsnamen"""
