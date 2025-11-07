@@ -387,7 +387,7 @@ def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200, te
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,   # <-- neue Schreibweise
         temperature=temperature,
     )
     return resp.choices[0].message.content.strip()
