@@ -13,7 +13,30 @@ from fastapi import FastAPI
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
+from traceback import format_exc
 
+@app.post("/ask", response_model=AnswerResponse)
+def ask(req: QuestionRequest):
+    try:
+        ranked = advanced_search(req.question, max_items=req.max_sources or 8)
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(req.question, ranked)
+
+        print("Y  LLM call → model:", OPENAI_MODEL, "| prompt_len:", len(user_prompt))
+        answer = call_openai(system_prompt, user_prompt, max_tokens=1200)
+        print("Y  LLM OK")
+
+        sources = build_sources(ranked, limit=req.max_sources or 3)
+        return AnswerResponse(answer=answer, sources=sources)
+
+    except Exception as e:
+        # Vollständiges Traceback ins Render-Log:
+        print("ERROR in /ask:", repr(e))
+        print(format_exc())
+
+        # Nutzerfreundlicher Fallback – immer schema-konform:
+        msg = "<strong>Entschuldigung, es gab einen technischen Fehler.</strong><br>Bitte versuchen Sie es in Kürze erneut."
+        return AnswerResponse(answer=msg, sources=[])
 # -----------------------------
 # OpenAI client
 # -----------------------------
@@ -381,18 +404,16 @@ def build_user_prompt(question: str, ranked_chunks: List[Tuple[int, Dict]]) -> s
 # LLM call
 # -----------------------------
 def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> str:
-    payload = {
-        "model": OPENAI_MODEL,
-        "messages": [
+    resp = openai_client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt},
         ],
-        "max_completion_tokens": max_tokens,
-    }
-    # KEINE temperature/top_p/frequency_penalty übergeben – dein Modell unterstützt nur Defaults
-    resp = openai_client.chat.completions.create(**payload)
+        max_completion_tokens=max_tokens,   # ✅ richtig
+        # KEIN temperature / top_p / frequency_penalty ...
+    )
     return resp.choices[0].message.content.strip()
-
 # -----------------------------
 # Sources builder
 # -----------------------------
