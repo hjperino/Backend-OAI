@@ -1,4 +1,4 @@
-
+# DLH Chatbot API (OpenAI) — full file
 import os
 import json
 import re
@@ -6,78 +6,76 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
+
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
 from pydantic import BaseModel
-
-# -----------------------------
-# OpenAI client (Chat Completions)
-# -----------------------------
+from fastapi.middleware.cors import CORSMiddleware
 from openai import OpenAI
 
+# -----------------------------
+# OpenAI client
+# -----------------------------
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
 openai_client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     organization=os.getenv("OPENAI_ORG_ID") or None,
 )
 
-def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200, temperature: float = 0.2) -> str:
-    resp = openai_client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_tokens=max_tokens,
-        temperature=temperature,
-    )
-    return resp.choices[0].message.content.strip()
-
-
 # -----------------------------
-# App / Models
+# FastAPI app
 # -----------------------------
 app = FastAPI(title="DLH Chatbot API (OpenAI)")
 
+# CORS for browser frontend
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=False,
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["*"],
+)
+
+# -----------------------------
+# Models
+# -----------------------------
 class QuestionRequest(BaseModel):
     question: str
     language: Optional[str] = "de"
     max_sources: Optional[int] = 8
 
+class Source(BaseModel):
+    url: str
+    title: str
+    snippet: str = ""
+
 class AnswerResponse(BaseModel):
     answer: str
-
+    sources: List[Source] = []
 
 # -----------------------------
-# Load processed chunks (cache)
+# Load processed chunks
 # -----------------------------
 CHUNKS: List[Dict] = []
 ROOT = Path(__file__).parent
-CANDIDATE_PATHS = [
+for candidate in [
     ROOT / "processed" / "processed_chunks.json",
     ROOT / "processed_chunks.json",
     Path("/mnt/data/processed_chunks.json"),
-]
-
-def load_chunks() -> None:
-    global CHUNKS
-    for p in CANDIDATE_PATHS:
-        if p.exists():
-            try:
-                CHUNKS = json.loads(p.read_text(encoding="utf-8"))
-                print(f"Loaded {len(CHUNKS)} chunks from {p}")
-                return
-            except Exception as e:
-                print("Failed to load chunks:", e)
-    CHUNKS = []
-    print("No processed_chunks.json found; proceeding without cache.")
-
-load_chunks()
-
+]:
+    if candidate.exists():
+        try:
+            CHUNKS = json.loads(candidate.read_text(encoding="utf-8"))
+            print(f"Loaded {len(CHUNKS)} chunks from {candidate}")
+            break
+        except Exception as e:
+            print("Failed to load chunks:", e)
+if not CHUNKS:
+    print("⚠️ No processed_chunks.json found; running without local context.")
 
 # -----------------------------
-# Helpers: German date parsing
+# Date parsing (German)
 # -----------------------------
 DE_MONTHS = {
     'januar': 1, 'jan': 1,
@@ -95,29 +93,25 @@ DE_MONTHS = {
 }
 
 def _normalize_dash(s: str) -> str:
-    return s.replace("\u2013", "-").replace("\u2014", "-").replace("–", "-").replace("—", "-")
+    return s.replace("\u2013", "-").replace("\u2014", "-").replace("–","-").replace("—","-")
 
 def parse_de_date_text(txt: str) -> Optional[datetime]:
-    """Parse e.g. '11. Nov 2025, 17:15 Uhr – 18:00 Uhr' into datetime (start)."""
     if not txt:
         return None
     s = _normalize_dash(txt.lower().strip())
     s = s.replace("uhr", "").replace(",", " ")
-    # spelled month
-    m = re.search(r"(\\d{1,2})\\s*(?:\\.\\s*)?(jan|januar|feb|februar|maerz|märz|mrz|mar|april|apr|mai|jun|juni|jul|juli|aug|august|sep|sept|september|okt|oktober|nov|november|dez|dezember)\\s*(\\d{4})", s)
+    m = re.search(r"(\d{1,2})\s*(?:\.\s*)?(jan|januar|feb|februar|maerz|märz|mrz|maer|mar|april|apr|mai|jun|juni|jul|juli|aug|august|sep|sept|september|okt|oktober|nov|november|dez|dezember)\s*(\d{4})", s)
     if m:
         day = int(m.group(1))
         mon = m.group(2)
         month = DE_MONTHS.get(mon, None)
         year = int(m.group(3))
     else:
-        # dd.mm.yyyy
-        m2 = re.search(r"(\\d{1,2})\\.(\\d{1,2})\\.(\\d{4})", s)
+        m2 = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", s)
         if not m2:
             return None
         day, month, year = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
-    # time
-    tmatch = re.search(r"(\\d{1,2}):(\\d{2})", s)
+    tmatch = re.search(r"(\d{1,2}):(\d{2})", s)
     hh, mm = (0, 0)
     if tmatch:
         hh, mm = int(tmatch.group(1)), int(tmatch.group(2))
@@ -125,7 +119,6 @@ def parse_de_date_text(txt: str) -> Optional[datetime]:
         return datetime(year, month, day, hh, mm, tzinfo=timezone.utc)
     except Exception:
         return None
-
 
 # -----------------------------
 # Live: Impuls-Workshops
@@ -212,9 +205,8 @@ def fetch_live_impuls_workshops() -> Optional[Dict]:
         }
     }
 
-
 # -----------------------------
-# Live: Innovationsfonds (Tag-Seiten je Fach)
+# Live: Innovationsfonds per subject
 # -----------------------------
 SUBJECT_SLUGS = {
     "chemie": "chemie",
@@ -224,7 +216,7 @@ SUBJECT_SLUGS = {
     "informatik": "informatik",
     "deutsch": "deutsch",
     "englisch": "englisch",
-    "franzoesisch": "franzoesisch",  # (nur diese Schreibweise)
+    "franzoesisch": "franzoesisch",  # nur diese Schreibweise
     "italienisch": "italienisch",
     "spanisch": "spanisch",
     "geschichte": "geschichte",
@@ -280,13 +272,11 @@ def fetch_live_innovationsfonds(subject: Optional[str] = None) -> Optional[Dict]
         }
     }
 
-
 # -----------------------------
-# Intent & Search
+# Intent / search
 # -----------------------------
 def normalize_query(q: str) -> Tuple[str, str]:
     ql = q.lower()
-    # Nur für Facherkennung Umlaute normalisieren
     q_norm = ql.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
     return ql, q_norm
 
@@ -301,7 +291,7 @@ def extract_query_intent(query: str) -> Dict:
         "informatik": ["informatik", "cs"],
         "deutsch": ["deutsch"],
         "englisch": ["englisch", "english"],
-        "franzoesisch": ["franzoesisch"],  # nur diese Schreibweise
+        "franzoesisch": ["franzoesisch"],
         "italienisch": ["italienisch"],
         "spanisch": ["spanisch"],
         "geschichte": ["geschichte"],
@@ -331,26 +321,25 @@ def advanced_search(query: str, max_items: int = 8) -> List[Tuple[int, Dict]]:
     query_lower = intent["query_lower"]
     results: List[Tuple[int, Dict]] = []
 
-    # 1) Forciere Live-Fetch für Workshops/Termine
+    # Workshops live
     if intent["is_date_query"] or any(k in query_lower for k in ["impuls", "workshop", "termine", "veranstaltung", "events"]):
         live_chunk = fetch_live_impuls_workshops()
         if live_chunk:
             results.append((220, live_chunk))
 
-    # 2) Forciere Live-Fetch für Innovationsfonds bei Facherkennung (auch ohne explizites Wort 'Innovationsfonds')
+    # Innovationsfonds live for any detected subject
     if intent["subject_keywords"]:
         for subj in intent["subject_keywords"]:
             live_proj = fetch_live_innovationsfonds(subject=subj)
             if live_proj:
                 results.append((300, live_proj))
 
-    # 3) Fallback: gecrawlte Chunks (niedrige Priorität)
-    for ch in CHUNKS[:256]:  # begrenzt
+    # Fallback: cached chunks
+    for ch in CHUNKS[:256]:
         results.append((120, ch))
 
-    # nach Score sortieren (höchster zuerst)
+    # sort & dedupe
     results.sort(key=lambda x: x[0], reverse=True)
-    # deduplizieren per source+title
     seen = set()
     filtered: List[Tuple[int, Dict]] = []
     for score, ch in results:
@@ -361,7 +350,6 @@ def advanced_search(query: str, max_items: int = 8) -> List[Tuple[int, Dict]]:
         seen.add(key)
         filtered.append((score, ch))
     return filtered[:max_items]
-
 
 # -----------------------------
 # Prompt building
@@ -381,22 +369,54 @@ def build_user_prompt(question: str, ranked_chunks: List[Tuple[int, Dict]]) -> s
         src = meta.get("source", "")
         title = meta.get("title", "")
         content = ch.get("content", "")
-        # truncate very long content
         if len(content) > 3500:
             content = content[:3500] + "…"
         lines.append(f"[{score}] {title} <{src}>")
         lines.append(content)
         lines.append("")
-    lines.append("AUFGABE: Antworte praezise und knapp. Bei Termin- oder Projektlisten verwende HTML-Listen.")
+    lines.append("AUFGABE: Antworte präzise und knapp. Bei Termin- oder Projektlisten verwende HTML-Listen.")
     return "\n".join(lines)
 
+# -----------------------------
+# LLM call
+# -----------------------------
+def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200, temperature: float = 0.2) -> str:
+    resp = openai_client.chat.completions.create(
+        model=OPENAI_MODEL,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        max_tokens=max_tokens,
+        temperature=temperature,
+    )
+    return resp.choices[0].message.content.strip()
 
 # -----------------------------
-# FastAPI endpoints
+# Sources builder
+# -----------------------------
+def build_sources(ranked: List[Tuple[int, Dict]], limit: int = 3) -> List[Dict]:
+    out = []
+    for score, ch in ranked:
+        meta = ch.get("metadata", {})
+        url = meta.get("source", "")
+        title = meta.get("title", "") or "Quelle"
+        if url:
+            out.append({
+                "url": url,
+                "title": title,
+                "snippet": ch.get("content", "")[:180]
+            })
+        if len(out) >= limit:
+            break
+    return out
+
+# -----------------------------
+# Endpoints
 # -----------------------------
 @app.get("/health")
 def health():
-    return {"status": "ok", "chunks": len(CHUNKS), "model": OPENAI_MODEL}
+    return {"status": "healthy", "chunks_loaded": len(CHUNKS), "model": OPENAI_MODEL}
 
 @app.get("/version")
 def version():
@@ -408,9 +428,12 @@ def ask(req: QuestionRequest):
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(req.question, ranked)
     answer = call_openai(system_prompt, user_prompt, max_tokens=1200, temperature=0.2)
-    return AnswerResponse(answer=answer)
-
+    sources = build_sources(ranked, limit=req.max_sources or 3)
+    return AnswerResponse(answer=answer, sources=sources)
 
 # -----------------------------
-# For local run: uvicorn ultimate_api:app --host 0.0.0.0 --port 8000
+# Local dev
 # -----------------------------
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
