@@ -5,7 +5,7 @@ import re
 import urllib.parse
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
-
+from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 from fastapi import FastAPI
