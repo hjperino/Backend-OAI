@@ -429,13 +429,13 @@ def root():
         "ok": True,
         "service": "DLH OpenAI API",
         "endpoints": ["/health", "/ask", "/version"]    
-
+    }
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     ranked = advanced_search(req.question, max_items=req.max_sources or 8)
     system_prompt = build_system_prompt()
     user_prompt = build_user_prompt(req.question, ranked)
-    answer = call_openai(system_prompt, user_prompt, max_completion_tokens=1200
+    answer = call_openai(system_prompt, user_prompt, max_tokens=1200)
     sources = build_sources(ranked, limit=req.max_sources or 3)
     return AnswerResponse(answer=answer, sources=sources)
 
@@ -488,12 +488,13 @@ def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> s
         
         context = "\n".join(context_parts)
         
-       prompt = f"""
+        prompt = f"""
 Heutiges Datum: {current_date_str}
 Bitte beantworte die folgende Frage mit Bezug auf die gegebenen Daten.
-{user_input}
+{question}
 """
 
+        return prompt
 def extract_dates_from_text(text: str) -> List[Tuple[datetime, str]]:
     """Extrahiere Daten aus Text - unterstA14tzt auch abgekA14rzte Monatsnamen"""
     dates_found = []
