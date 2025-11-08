@@ -463,6 +463,79 @@ def ensure_clickable_links(html_text: str) -> str:
         u = m.group(1)
         return f"<a href='{html.escape(u)}' target='_blank'>{html.escape(u)}</a>"
     return url_re.sub(repl, html_text)
+
+import inspect
+
+REQUIRED_SYS_HINTS = [
+    "valide", "HTML", "Quellen", "<a href", "Liste", "Timeline"  # locker gehalten
+]
+
+def _sample_hits():
+    # Minimale, realistische Testdaten für den Prompt
+    return [
+        {
+            "title": "Impulsworkshops – Übersicht",
+            "url": "https://dlh.zh.ch/home/impuls-workshops",
+            "snippet": "Aktuelle und kommende Impuls-Workshops mit Datum und Anmeldung."
+        },
+        {
+            "title": "Innovationsfonds – Chemie",
+            "url": "https://dlh.zh.ch/home/innovationsfonds/chemie",
+            "snippet": "Sechs Projekte im Fach Chemie mit Kurzbeschreibung."
+        }
+    ]
+
+def validate_prompts() -> dict:
+    """Prüft System-/User-Prompt, Link-Formatter und call_openai-Signatur."""
+    results = {"ok": True, "checks": []}
+
+    # 1) build_system_prompt vorhanden & enthält die erwarteten Stichworte
+    try:
+        sp = build_system_prompt()
+        ok = isinstance(sp, str) and len(sp) > 20 and all(h.lower() in sp.lower() for h in REQUIRED_SYS_HINTS)
+        results["checks"].append({"name": "build_system_prompt", "ok": ok, "len": len(sp)})
+        if not ok:
+            results["ok"] = False
+    except Exception as e:
+        results["checks"].append({"name": "build_system_prompt", "ok": False, "error": repr(e)})
+        results["ok"] = False
+
+    # 2) build_user_prompt erzeugt sinnvollen Text mit Frage+Treffern
+    try:
+        up = build_user_prompt("Welche Impuls-Workshops stehen als Nächstes an?", _sample_hits())
+        ok = isinstance(up, str) and "Benutzerfrage" in up and "Relevante Auszüge" in up and "http" in up
+        results["checks"].append({"name": "build_user_prompt", "ok": ok, "len": len(up)})
+        if not ok:
+            results["ok"] = False
+    except Exception as e:
+        results["checks"].append({"name": "build_user_prompt", "ok": False, "error": repr(e)})
+        results["ok"] = False
+
+    # 3) ensure_clickable_links macht aus URL einen <a>-Link
+    try:
+        test_html = "Siehe https://dlh.zh.ch/home/impuls-workshops für Details."
+        html_out = ensure_clickable_links(test_html)
+        ok = "<a href=" in html_out and "target='_blank'" in html_out
+        results["checks"].append({"name": "ensure_clickable_links", "ok": ok})
+        if not ok:
+            results["ok"] = False
+    except Exception as e:
+        results["checks"].append({"name": "ensure_clickable_links", "ok": False, "error": repr(e)})
+        results["ok"] = False
+
+    # 4) call_openai Signatur: (system_prompt, user_prompt, max_tokens=...)
+    try:
+        sig = inspect.signature(call_openai)
+        params = list(sig.parameters.keys())
+        ok = params[:2] == ["system_prompt", "user_prompt"] and "max_tokens" in params
+        results["checks"].append({"name": "call_openai_signature", "ok": ok, "params": params})
+        if not ok:
+            results["ok"] = False
+    except Exception as e:
+        results["checks"].append({"name": "call_openai_signature", "ok": False, "error": repr(e)})
+        results["ok"] = False
+
+    return results
 # -----------------------------
 # Endpoints
 # -----------------------------
@@ -501,7 +574,12 @@ def ask(req: QuestionRequest):
         msg = ("<strong>Entschuldigung, es gab einen technischen Fehler.</strong><br>"
                "Bitte versuchen Sie es später erneut.")
         return AnswerResponse(answer=msg, sources=[])
-
+        
+@app.get("/debug/validate")
+def debug_validate():
+    """Läuft ohne OpenAI-Call. Gut für schnelle Deploy-Checks."""
+    res = validate_prompts()
+    return res
 # -----------------------------
 # Local dev
 # -----------------------------
@@ -705,6 +783,14 @@ def load_and_preprocess_data():
         import traceback
         traceback.print_exc()
         return [], {}, {}, {}
+
+# --- Startup-Check: Prompt-Validierung beim Deploy ---
+try:
+    _v = validate_prompts()
+    print("Y  prompt validation:", _v)
+except Exception as _e:
+    print("Y  prompt validation ERROR:", repr(_e))
+
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
