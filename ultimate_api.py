@@ -784,13 +784,13 @@ def load_and_preprocess_data():
         traceback.print_exc()
         return [], {}, {}, {}
 
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
+
 # --- Startup-Check: Prompt-Validierung beim Deploy ---
 try:
     _v = validate_prompts()
     print("Y  prompt validation:", _v)
 except Exception as _e:
     print("Y  prompt validation ERROR:", repr(_e))
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
