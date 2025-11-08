@@ -382,41 +382,41 @@ def advanced_search(query: str, max_items: int = 8) -> List[Tuple[int, Dict]]:
 def build_system_prompt() -> str:
     return (
         "Du bist der offizielle DLH Chatbot. Antworte auf Deutsch mit HTML-Formatierung. "
-        "Wenn der Kontext mehrere Termin- oder Projektzeilen enthaelt, liste ALLE als eine HTML-Liste "
+        "Wenn der Kontext mehrere Termin- oder Projektzeilen enthält, liste ALLE als eine HTML-Liste "
         "(<ul><li>…</li></ul>) auf. Nenne bei Terminen Datum und Zeit sowie einen verlinkten Titel. "
-        "Bei Projekten im Innovationsfonds liste die Titel jeweils als klickbare Links."
+        "Bei Projekten im Innovationsfonds liste die Titel jeweils als klickbare Links. "
+        "Wenn es sich um Termine/Workshops handelt, nutze folgendes HTML-Muster:\n\n"
+        "<section class='dlh-answer'>\n"
+        "  <p>Kurz-Einleitung (1 Satz).</p>\n"
+        "  <ol class='timeline'>\n"
+        "    <li>\n"
+        "      <time>2025-11-11</time>\n"
+        "      <a href='URL' target='_blank'>Titel des Workshops</a>\n"
+        "      <div class='meta'>Ort/Format (falls bekannt)</div>\n"
+        "    </li>\n"
+        "    <!-- weitere <li> ... -->\n"
+        "  </ol>\n"
+        "  <h3>Quellen</h3>\n"
+        "  <ul class='sources'>\n"
+        "    <li><a href='URL' target='_blank'>Titel oder Domain</a></li>\n"
+        "  </ul>\n"
+        "</section>\n\n"
+        "Bei Projektlisten nutze Karten:\n\n"
+        "<section class='dlh-answer'>\n"
+        "  <p>Kurz-Einleitung (1 Satz).</p>\n"
+        "  <div class='cards'>\n"
+        "    <article class='card'>\n"
+        "      <h4><a href='URL' target='_blank'>Projekttitel</a></h4>\n"
+        "      <p>Kurze Beschreibung (1–2 Sätze).</p>\n"
+        "    </article>\n"
+        "    <!-- weitere .card ... -->\n"
+        "  </div>\n"
+        "  <h3>Quellen</h3>\n"
+        "  <ul class='sources'>\n"
+        "    <li><a href='URL' target='_blank'>Titel oder Domain</a></li>\n"
+        "  </ul>\n"
+        "</section>\n"
     )
-
-def build_user_prompt(question: str, hits: List[Dict]) -> str:
-    """Erzeugt den Prompt für das LLM mit Query, Datum und relevanten Textauszügen."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    parts = [
-        f"Heutiges Datum: {today}",
-        f"Benutzerfrage: {question}",
-        "",
-        "Relevante Auszüge (Titel – URL – Snippet):"
-    ]
-
-    for h in hits[:12]:
-        title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
-        url = h.get("url") or h.get("metadata", {}).get("source") or ""
-        snippet = (
-            h.get("snippet")
-            or h.get("content")
-            or h.get("metadata", {}).get("description")
-            or ""
-        )
-        snippet = snippet[:300].replace("\n", " ").strip()
-        parts.append(f"- {title} — {url}\n  {snippet}")
-
-    parts.append(
-        "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
-        "Verwende Listen (<ul><li>…</li></ul>) oder Tabellen, wenn sinnvoll. "
-        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a>. "
-        "Wenn Informationen unsicher sind, erwähne dies und verlinke die Quelle."
-    )
-
-    return "\n".join(parts)
 
 # -----------------------------
 # LLM call
