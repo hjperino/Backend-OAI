@@ -379,6 +379,15 @@ def advanced_search(query: str, max_items: int = 8) -> List[Tuple[int, Dict]]:
 # -----------------------------
 # Prompt building
 # -----------------------------
+def _as_dict(hit) -> Dict:
+    """Akzeptiert Treffer als Dict oder (score, dict) und gibt immer ein Dict zurück."""
+    if isinstance(hit, dict):
+        return hit
+    if isinstance(hit, tuple) and len(hit) >= 2 and isinstance(hit[1], dict):
+        return hit[1]
+    # Fallback – lieber leeres Dict als Exception im Produktivbetrieb
+    return {}
+
 def build_system_prompt() -> str:
     return (
         "Du bist der offizielle DLH Chatbot. Antworte auf Deutsch mit HTML-Formatierung. "
@@ -421,6 +430,9 @@ def build_user_prompt(question: str, hits: List[Dict]) -> str:
     """Erzeugt einen präzisen Prompt für GPT mit Frage, Datum und relevanten Auszügen."""
     today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
 
+    # 🔧 WICHTIG: Treffer zuerst normalisieren (Dict oder (score, dict) → Dict)
+    norm_hits: List[Dict] = [_as_dict(h) for h in hits]
+
     parts = [
         f"Heutiges Datum: {today}",
         f"Benutzerfrage: {question}",
@@ -429,7 +441,7 @@ def build_user_prompt(question: str, hits: List[Dict]) -> str:
         ""
     ]
 
-    for i, h in enumerate(hits[:12], start=1):
+    for i, h in enumerate(norm_hits[:12], start=1):
         title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
         url = h.get("url") or h.get("metadata", {}).get("source") or ""
         snippet = (
@@ -440,7 +452,6 @@ def build_user_prompt(question: str, hits: List[Dict]) -> str:
         )
         snippet = snippet[:350].replace("\n", " ").strip()
 
-        # Schönere, natürlichere Darstellung im Prompt
         parts.append(
             f"{i}. Quelle: {title} ({url})\n"
             f"   Auszug: {snippet}"
@@ -471,18 +482,21 @@ def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) ->
 # -----------------------------
 # Sources builder
 # -----------------------------
-def build_sources(ranked: List[Tuple[int, Dict]], limit: int = 3) -> List[Dict]:
-    out = []
-    for score, ch in ranked:
-        meta = ch.get("metadata", {})
-        url = meta.get("source", "")
-        title = meta.get("title", "") or "Quelle"
-        if url:
-            out.append({
-                "url": url,
-                "title": title,
-                "snippet": ch.get("content", "")[:180]
-            })
+def build_sources(hits: List[Dict], limit: int = 3) -> List[SourceItem]:
+    seen = set()
+    out: List[SourceItem] = []
+
+    # 🔧 Normalisieren (Dict oder (score, dict) → Dict)
+    for h in [_as_dict(h) for h in hits]:
+        url = h.get("url") or h.get("source") or h.get("metadata", {}).get("source")
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        out.append(SourceItem(
+            title=h.get("title") or h.get("metadata", {}).get("title") or "Quelle",
+            url=url,
+            snippet=(h.get("snippet") or h.get("text") or h.get("content") or "")[:240]
+        ))
         if len(out) >= limit:
             break
     return out
@@ -594,6 +608,7 @@ def root():
 def ask(req: QuestionRequest):
     try:
         ranked = advanced_search(req.question, max_items=req.max_sources or 12)
+        print("Y  ranked types:", [type(x).__name__ for x in ranked[:5]])
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(req.question, ranked)
 
