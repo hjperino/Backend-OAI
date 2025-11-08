@@ -327,6 +327,19 @@ def extract_query_intent(query: str) -> Dict:
         "is_date_query": is_date_query,
         "is_innovationsfonds_query": is_innovationsfonds_query,
     }
+SUBJECT_SLUGS = {
+    "französisch": "franzoesisch",  # genau diese Schreibweise
+    "franzoesisch": "franzoesisch",
+    "englisch": "englisch",
+    "deutsch": "deutsch",
+    "chemie": "chemie",
+    "mathematik": "mathematik",
+    # ggf. ergänzen …
+}
+
+def normalize_subject(text: str) -> Optional[str]:
+    t = (text or "").strip().lower()
+    return SUBJECT_SLUGS.get(t)
 
 def advanced_search(query: str, max_items: int = 8) -> List[Tuple[int, Dict]]:
     intent = extract_query_intent(query)
@@ -374,20 +387,36 @@ def build_system_prompt() -> str:
         "Bei Projekten im Innovationsfonds liste die Titel jeweils als klickbare Links."
     )
 
-def build_user_prompt(question: str, ranked_chunks: List[Tuple[int, Dict]]) -> str:
-    lines = [f"FRAGE: {question}", "", "KONTEXT:"]
-    for score, ch in ranked_chunks:
-        meta = ch.get("metadata", {})
-        src = meta.get("source", "")
-        title = meta.get("title", "")
-        content = ch.get("content", "")
-        if len(content) > 3500:
-            content = content[:3500] + "…"
-        lines.append(f"[{score}] {title} <{src}>")
-        lines.append(content)
-        lines.append("")
-    lines.append("AUFGABE: Antworte präzise und knapp. Bei Termin- oder Projektlisten verwende HTML-Listen.")
-    return "\n".join(lines)
+def build_user_prompt(question: str, hits: List[Dict]) -> str:
+    """Erzeugt den Prompt für das LLM mit Query, Datum und relevanten Textauszügen."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    parts = [
+        f"Heutiges Datum: {today}",
+        f"Benutzerfrage: {question}",
+        "",
+        "Relevante Auszüge (Titel – URL – Snippet):"
+    ]
+
+    for h in hits[:12]:
+        title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
+        url = h.get("url") or h.get("metadata", {}).get("source") or ""
+        snippet = (
+            h.get("snippet")
+            or h.get("content")
+            or h.get("metadata", {}).get("description")
+            or ""
+        )
+        snippet = snippet[:300].replace("\n", " ").strip()
+        parts.append(f"- {title} — {url}\n  {snippet}")
+
+    parts.append(
+        "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
+        "Verwende Listen (<ul><li>…</li></ul>) oder Tabellen, wenn sinnvoll. "
+        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a>. "
+        "Wenn Informationen unsicher sind, erwähne dies und verlinke die Quelle."
+    )
+
+    return "\n".join(parts)
 
 # -----------------------------
 # LLM call
@@ -421,7 +450,19 @@ def build_sources(ranked: List[Tuple[int, Dict]], limit: int = 3) -> List[Dict]:
         if len(out) >= limit:
             break
     return out
+    
+import html, re  # oben schon vorhanden? Wenn nicht, hier lassen.
 
+def ensure_clickable_links(html_text: str) -> str:
+    """
+    Wandelt nackte URLs im Text in anklickbare Links um:
+    https://beispiel -> <a href='...' target='_blank'>...</a>
+    """
+    url_re = re.compile(r'(https?://[^\s<>"\)]+)')
+    def repl(m):
+        u = m.group(1)
+        return f"<a href='{html.escape(u)}' target='_blank'>{html.escape(u)}</a>"
+    return url_re.sub(repl, html_text)
 # -----------------------------
 # Endpoints
 # -----------------------------
@@ -442,12 +483,24 @@ def root():
     }
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
-    ranked = advanced_search(req.question, max_items=req.max_sources or 8)
-    system_prompt = build_system_prompt()
-    user_prompt = build_user_prompt(req.question, ranked)
-    answer = call_openai(system_prompt, user_prompt, max_tokens=1200)
-    sources = build_sources(ranked, limit=req.max_sources or 3)
-    return AnswerResponse(answer=answer, sources=sources)
+    try:
+        ranked = advanced_search(req.question, max_items=req.max_sources or 12)
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(req.question, ranked)
+
+        print("Y  LLM call →", OPENAI_MODEL, "| prompt_len:", len(user_prompt))
+        answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
+        answer_html = ensure_clickable_links(answer_html)
+
+        sources = build_sources(ranked, limit=req.max_sources or 4)
+        return AnswerResponse(answer=answer_html, sources=sources)
+
+    except Exception as e:
+        print("ERROR /ask:", repr(e))
+        print(format_exc())
+        msg = ("<strong>Entschuldigung, es gab einen technischen Fehler.</strong><br>"
+               "Bitte versuchen Sie es später erneut.")
+        return AnswerResponse(answer=msg, sources=[])
 
 # -----------------------------
 # Local dev
@@ -455,7 +508,17 @@ def ask(req: QuestionRequest):
 
 
 # === Functions carried over from old live_patch2_fix (needed) ===
-
+def build_system_prompt() -> str:
+    return (
+        "Du bist ein sachlicher Assistent des Digital Learning Hub Sek II (DLH Zürich). "
+        "Sprich Deutsch. Antworte knapp, korrekt, ohne Spekulation. "
+        "Formatiere die Antwort als valides HTML:\n"
+        "- kurze Einleitung (1–2 Sätze)\n"
+        "- strukturierte Liste (bullet points oder Timeline) der wichtigen Punkte\n"
+        "- nutze <a href='URL' target='_blank'>Titel</a> für Links\n"
+        "- schliesse mit einem Abschnitt <h3>Quellen</h3> und einer kurzen Liste der verwendeten URLs\n"
+        "Wenn Informationen unsicher sind, kennzeichne dies und verlinke die Quelle."
+    )
 def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> str:
     """Erstelle Prompt - Formatierung ist im System Prompt"""
     
