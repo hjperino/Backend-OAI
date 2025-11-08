@@ -418,16 +418,18 @@ def build_system_prompt() -> str:
         "</section>\n"
     )
 def build_user_prompt(question: str, hits: List[Dict]) -> str:
-    """Erzeugt den Prompt für das LLM mit Query, Datum und relevanten Textauszügen."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    """Erzeugt einen präzisen Prompt für GPT mit Frage, Datum und relevanten Auszügen."""
+    today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
+
     parts = [
         f"Heutiges Datum: {today}",
         f"Benutzerfrage: {question}",
         "",
-        "Relevante Auszüge (Titel – URL – Snippet):"
+        "Kontext: Nachfolgend findest du relevante Informationen aus Webseiten und Dokumenten:",
+        ""
     ]
 
-    for h in hits[:12]:
+    for i, h in enumerate(hits[:12], start=1):
         title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
         url = h.get("url") or h.get("metadata", {}).get("source") or ""
         snippet = (
@@ -436,14 +438,19 @@ def build_user_prompt(question: str, hits: List[Dict]) -> str:
             or h.get("metadata", {}).get("description")
             or ""
         )
-        snippet = snippet[:300].replace("\n", " ").strip()
-        parts.append(f"- {title} — {url}\n  {snippet}")
+        snippet = snippet[:350].replace("\n", " ").strip()
+
+        # Schönere, natürlichere Darstellung im Prompt
+        parts.append(
+            f"{i}. Quelle: {title} ({url})\n"
+            f"   Auszug: {snippet}"
+        )
 
     parts.append(
-        "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
-        "Verwende Listen (<ul><li>…</li></ul>) oder Tabellen, wenn sinnvoll. "
-        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a>. "
-        "Wenn Informationen unsicher sind, erwähne dies und verlinke die Quelle."
+        "\nAufgabe: Formuliere die Antwort in sauberem HTML, wie im System-Prompt beschrieben. "
+        "Wenn es sich um eine Termin- oder Projektliste handelt, fasse die Informationen übersichtlich zusammen. "
+        "Verwende Listen (<ul>, <ol>) oder Tabellen, wenn sinnvoll. "
+        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a> und gib am Ende eine kurze Liste der Quellen aus."
     )
 
     return "\n".join(parts)
