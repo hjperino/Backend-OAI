@@ -645,12 +645,12 @@ def _parse_german_date(text: str) -> Optional[str]:
 
 def fetch_live_impuls_workshops() -> List[Dict]:
     """
-    Holt die Workshop-Übersichtsseite live und extrahiert (Datum, Titel, Link).
-    Gibt List[Dict] mit keys: title, url, date_iso, date_text, snippet.
+    Holt die Workshop-Übersichtsseite live und extrahiert (Datum, Titel, Link)
+    aus dem Abschnitt 'Termine der aktuellen Impuls-Workshops'.
     """
-    url = "https://dlh.zh.ch/home/impuls-workshops"
+    base_url = "https://dlh.zh.ch/home/impuls-workshops"
     try:
-        resp = requests.get(url, timeout=12)
+        resp = requests.get(base_url, timeout=12)
         resp.raise_for_status()
     except Exception:
         return []
@@ -658,56 +658,93 @@ def fetch_live_impuls_workshops() -> List[Dict]:
     soup = BeautifulSoup(resp.text, "html.parser")
     results: List[Dict] = []
 
-    # 1) Anker sammeln (verlinkte Titel)
-    anchors = soup.select("a[href]")
-    for a in anchors:
-        title = (a.get_text(" ", strip=True) or "").strip()
-        href = a.get("href")
-        if not title or not href:
-            continue
-        # nur interne DLH-Links/Abschnitte berücksichtigen
-        if href.startswith("/"):
-            href = urllib.parse.urljoin(url, href)
+    # Überschrift lokalisieren
+    heading = None
+    for tag in soup.find_all(["h2", "h3"]):
+        txt = " ".join(tag.get_text(" ", strip=True).split()).lower()
+        if "termine der aktuellen impuls-workshops" in txt:
+            heading = tag
+            break
 
-        # Sehr generisch: wir suchen in der unmittelbaren Umgebung nach einem Datum
-        block_text = " ".join(
-            (a.find_parent().get_text(" ", strip=True) if a.find_parent() else a.get_text(" ", strip=True)).split()
-        )
+    def extract_from_block(node) -> Optional[Dict]:
+        """Block (node) nach Datum + Link auswerten."""
+        if not node:
+            return None
+        block_text = " ".join(node.get_text(" ", strip=True).split())
         date_iso = _parse_german_date(block_text)
-        if not date_iso:
-            # ggf. in vorherigem/folgenden Geschwister
-            prev = a.find_parent().find_previous(string=True) if a.find_parent() else None
-            nxt = a.find_parent().find_next(string=True) if a.find_parent() else None
-            date_iso = _parse_german_date(prev or "") or _parse_german_date(nxt or "")
 
-        # Nur Kandidaten, die wie ein Workshop-Titel aussehen (keine globale Navigation)
+        link = node.find("a", href=True)
+        if not link:
+            sib = node.find_next_sibling() if node else None
+            if sib:
+                link = sib.find("a", href=True)
+        if not link:
+            return None
+
+        href = link.get("href", "")
+        if href.startswith("/"):
+            href = urllib.parse.urljoin(base_url, href)
+
+        title = (link.get_text(" ", strip=True) or "").strip()
         if len(title) < 6:
-            continue
+            return None
 
-        # Wenn ein Datum gefunden wurde, speichern
-        if date_iso:
-            results.append({
-                "title": title,
-                "url": href,
-                "date_iso": date_iso,
-                "date_text": date_iso,  # fallback – ISO anzeigen; Modell/Renderer formatiert hübsch
-                "snippet": block_text[:240]
-            })
+        if not date_iso:
+            prev_txt = ""
+            nxt_txt = ""
+            prev = node.find_previous(string=True)
+            nxt = node.find_next(string=True)
+            if prev:
+                prev_txt = " ".join(str(prev).split())
+            if nxt:
+                nxt_txt = " ".join(str(nxt).split())
+            date_iso = _parse_german_date(prev_txt) or _parse_german_date(nxt_txt)
 
-    # Duplikate nach (url, title) raus
-    seen = set()
-    deduped = []
-    for r in results:
-        k = (r["url"], r["title"])
-        if k in seen:
+        if not date_iso:
+            return None
+
+        return {
+            "title": title,
+            "url": href,
+            "date_iso": date_iso,
+            "date_text": date_iso,
+            "snippet": block_text[:240],
+        }
+
+    candidates: List[Dict] = []
+
+    if heading is not None:
+        # Durch folgende Geschwister bis zur nächsten großen Überschrift
+        for sib in heading.find_all_next():
+            if sib.name in ("h2", "h3") and sib is not heading:
+                break
+            if sib.name in ("div", "article", "section", "li", "p"):
+                item = extract_from_block(sib)
+                if item:
+                    candidates.append(item)
+
+    # Fallback: global scannen, falls noch nichts gefunden
+    if not candidates:
+        for cont in soup.find_all(["div", "article", "section", "li", "p"]):
+            item = extract_from_block(cont)
+            if item:
+                candidates.append(item)
+
+    # Dedup + zukünftige Termine + Sortierung
+    seen: set = set()
+    deduped: List[Dict] = []
+    for r in candidates:
+        key = (r["url"], r["title"])
+        if key in seen:
             continue
-        seen.add(k)
+        seen.add(key)
         deduped.append(r)
 
-    # Zukünftige Termine behalten + nach Datum sortieren
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     future = [r for r in deduped if r["date_iso"] >= today]
     future.sort(key=lambda x: x["date_iso"])
+
+    print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(future)} future events (raw {len(candidates)})")
     return future
     
 def render_workshops_html(items: List[Dict]) -> str:
@@ -745,17 +782,54 @@ def render_workshops_html(items: List[Dict]) -> str:
         "</ul>"
         "</section>"
     )
-    return html        
+    return html      
+    
+    # --- German month mapping + date parsing helpers ---
+GER_MONTHS = {
+    "jan": 1, "januar": 1,
+    "feb": 2, "februar": 2,
+    "mär": 3, "maerz": 3, "märz": 3,
+    "apr": 4, "april": 4,
+    "mai": 5,
+    "jun": 6, "juni": 6,
+    "jul": 7, "juli": 7,
+    "aug": 8, "august": 8,
+    "sep": 9, "sept": 9, "september": 9,
+    "okt": 10, "oktober": 10,
+    "nov": 11, "november": 11,
+    "dez": 12, "dezember": 12,
+}
+
+def _parse_german_date(text: str) -> Optional[str]:
+    """
+    Erkenne Datumsangaben wie '11 Nov. 2025' o.ä. und liefere 'YYYY-MM-DD'.
+    """
+    if not text:
+        return None
+    t = re.sub(r"\s+", " ", text, flags=re.I).strip()
+    m = re.search(r"(\d{1,2})\s*\.?\s*([A-Za-zäöüÄÖÜ\.]+)\s+(\d{4})", t)
+    if not m:
+        return None
+    day = int(m.group(1))
+    mon_raw = m.group(2).lower().replace(".", "")
+    mon_raw = mon_raw.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+    month = GER_MONTHS.get(mon_raw)
+    year = int(m.group(3))
+    if not month or not (1 <= day <= 31):
+        return None
+    try:
+        return datetime(year, month, day).strftime("%Y-%m-%d")
+    except Exception:
+        return None  
     
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
         ranked = advanced_search(req.question, max_items=req.max_sources or 12)
         print("Y  ranked types:", [type(x).__name__ for x in ranked[:5]])
-        system_prompt = build_system_prompt()
-        user_prompt = build_user_prompt(req.question, ranked)
-        
-         q_low = (req.question or "").lower()
+
+        # Früher Exit für Workshop-Fragen: live scrapen & direkt rendern
+        q_low = (req.question or "").lower()
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
             live = fetch_live_impuls_workshops()
             if live:
@@ -767,7 +841,7 @@ def ask(req: QuestionRequest):
                         snippet="Kommende Impuls-Workshops des DLH"
                     )
                 ]
-                if live and live[0].get("url"):
+                if live[0].get("url"):
                     srcs.append(
                         SourceItem(
                             title=live[0]["title"],
@@ -776,6 +850,10 @@ def ask(req: QuestionRequest):
                         )
                     )
                 return AnswerResponse(answer=html, sources=srcs)
+
+        # LLM-Weg (wenn kein Workshop-Sonderfall gegriffen hat)
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(req.question, ranked)
 
         print("Y  LLM call →", OPENAI_MODEL, "| prompt_len:", len(user_prompt))
         answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
