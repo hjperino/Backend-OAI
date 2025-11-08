@@ -417,7 +417,36 @@ def build_system_prompt() -> str:
         "  </ul>\n"
         "</section>\n"
     )
+def build_user_prompt(question: str, hits: List[Dict]) -> str:
+    """Erzeugt den Prompt für das LLM mit Query, Datum und relevanten Textauszügen."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    parts = [
+        f"Heutiges Datum: {today}",
+        f"Benutzerfrage: {question}",
+        "",
+        "Relevante Auszüge (Titel – URL – Snippet):"
+    ]
 
+    for h in hits[:12]:
+        title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
+        url = h.get("url") or h.get("metadata", {}).get("source") or ""
+        snippet = (
+            h.get("snippet")
+            or h.get("content")
+            or h.get("metadata", {}).get("description")
+            or ""
+        )
+        snippet = snippet[:300].replace("\n", " ").strip()
+        parts.append(f"- {title} — {url}\n  {snippet}")
+
+    parts.append(
+        "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
+        "Verwende Listen (<ul><li>…</li></ul>) oder Tabellen, wenn sinnvoll. "
+        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a>. "
+        "Wenn Informationen unsicher sind, erwähne dies und verlinke die Quelle."
+    )
+
+    return "\n".join(parts)
 # -----------------------------
 # LLM call
 # -----------------------------
