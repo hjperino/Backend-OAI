@@ -1080,9 +1080,8 @@ def load_and_preprocess_data():
 
 if __name__ == "__main__":
     import uvicorn
-import xml.etree.ElementTree as ET
-
     uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
+    
 @app.on_event("startup")
 def _run_prompt_validation():
     try:
