@@ -1065,36 +1065,45 @@ def ask(req: QuestionRequest):
         # Früher Exit für Workshop-Fragen: live scrapen & direkt rendern
         q_low = (req.question or "").lower()
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            live = fetch_live_impuls_workshops()
-            if live:
-                html = render_workshops_html(live)
-                srcs = [
-                    SourceItem(
-                        title="Impuls-Workshops – Übersicht",
-                        url="https://dlh.zh.ch/home/impuls-workshops",
-                        snippet="Kommende Impuls-Workshops des DLH"
-                    )
-                ]
-                if live[0].get("url"):
-                    srcs.append(
-                        SourceItem(
-                            title=live[0]["title"],
-                            url=live[0]["url"],
-                            snippet=live[0].get("snippet", "")
-                        )
-                    )
-                return AnswerResponse(answer=html, sources=srcs)
+        # ---------- Workshops (Impuls) – Intent & Filter ----------
+        # DEBUG: Intent-Flags ausgeben
+        print("Y Workshops: entered branch")
 
-                # --- Impuls-Workshops: neue Logik mit Datumserkennung ---
-        q_low = req.question.lower()
+        def norm(s: str) -> str:
+            # robuste Erkennung: lower-case + Umlaute -> ae/oe/ue
+            s = s.lower()
+            s = (s.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+                    .replace("ß", "ss"))
+            return s
 
-        want_past = any(k in q_low for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten"])
-        want_next = any(k in q_low for k in ["nächste", "naechste", "der nächste", "der naechste", "als nächstes", "als naechstes", "nur der nächste", "nur der naechste"])
+        qn = norm(req.question)
 
-        events = fetch_live_impuls_workshops()  # deine bestehende Funktion
+        want_past = any(k in qn for k in [
+            "gab es", "waren", "vergangenen", "bisherigen",
+            "im jahr", "letzten", "frühere", "fruehere", "bisher"
+        ])
+        want_next = any(k in qn for k in [
+            "naechste", "nächste", "der naechste", "der nächste",
+            "als naechstes", "als nächstes", "nur der naechste", "nur der nächste",
+            "nächstes", "naechstes"
+        ])
+
+        # optional: Jahreszahl aus der Frage holen
+        yr = None
+        m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
+        if m:
+            try:
+                yr = int(m.group(1))
+            except ValueError:
+                yr = None
+
+        events = fetch_live_impuls_workshops()  # liefert Liste Dicts: {'date': date, 'title':..., 'url':...}
         today = datetime.now(timezone.utc).date()
-        future = [e for e in events if e["date"] and e["date"] >= today]
-        past   = [e for e in events if e["date"] and e["date"] <  today]
+        future = [e for e in events if e.get("date") and e["date"] >= today]
+        past   = [e for e in events if e.get("date") and e["date"] <  today]
+
+        print(f"Y Workshops flags: want_next={want_next}, want_past={want_past}, year={yr}")
+        print(f"Y Workshops counts: future={len(future)}, past={len(past)}")
 
         if want_next:
             future_sorted = sorted(future, key=lambda x: x["date"])
@@ -1106,19 +1115,16 @@ def ask(req: QuestionRequest):
             )
 
         if want_past:
-            # optional: „im Jahr 2025“ erkennen
-            m = re.search(r"(?:jahr|jahrgang)\s*(20\d{2})", q_low)
-            if m:
-                year = int(m.group(1))
-                past = [e for e in past if e["date"].year == year]
+            if yr:
+                past = [e for e in past if e["date"].year == yr]
             past_sorted = sorted(past, key=lambda x: x["date"], reverse=True)
-            html = render_workshops_timeline_html(past_sorted, title="Vergangene Impuls-Workshops")
+            html = render_workshops_timeline_html(past_sorted, title="Vergangene Impuls-Workshops" + (f" {yr}" if yr else ""))
             return AnswerResponse(
                 answer=html,
                 sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
             )
 
-        # default: alle ab heute
+        # Default: alle ab heute
         future_sorted = sorted(future, key=lambda x: x["date"])
         html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops")
         return AnswerResponse(
