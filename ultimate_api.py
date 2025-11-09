@@ -1065,7 +1065,7 @@ def ask(req: QuestionRequest):
         # Früher Exit für Workshop-Fragen: live scrapen & direkt rendern
         q_low = (req.question or "").lower()
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-        # ---------- Workshops (Impuls) – Intent & Filter ----------
+         # ---------- Workshops (Impuls) – Intent & Filter ----------
         print("Y Workshops: entered branch")
 
         def _norm(s: str) -> str:
@@ -1143,13 +1143,6 @@ def ask(req: QuestionRequest):
                 title="Impuls-Workshop-Übersicht",
                 url="https://dlh.zh.ch/home/impuls-workshops"
             )]
-        )
-        # Default: alle ab heute
-        future_sorted = sorted(future, key=lambda x: x["date"])
-        html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops")
-        return AnswerResponse(
-            answer=html,
-            sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
         )
                 
 
