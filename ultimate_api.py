@@ -1065,85 +1065,96 @@ def ask(req: QuestionRequest):
         # Früher Exit für Workshop-Fragen: live scrapen & direkt rendern
         q_low = (req.question or "").lower()
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-        # ---------- Workshops (Impuls) – Intent & Filter ----------
-        print("Y Workshops: entered branch")
+            # ---------- Workshops (Impuls) – Intent & Filter ----------
+            print("Y Workshops: entered branch")
 
-        def _norm(s: str) -> str:
-            s = s.lower()
-            return (s.replace("ä", "ae")
+            def _norm(s: str) -> str:
+                s = s.lower()
+                return (
+                    s.replace("ä", "ae")
                      .replace("ö", "oe")
                      .replace("ü", "ue")
-                     .replace("ß", "ss"))
+                     .replace("ß", "ss")
+                )
 
-        qn = _norm(req.question)
+            qn = _norm(req.question)
 
-        want_past = any(k in qn for k in [
-            "gab es", "waren", "vergangenen", "bisherigen",
-            "im jahr", "letzten", "fruehere", "frühere", "bisher"
-        ])
-        want_next = any(k in qn for k in [
-            "naechste", "nächste", "der naechste", "der nächste",
-            "als naechstes", "als nächstes", "nur der naechste", "nur der nächste",
-            "naechstes", "nächstes"
-        ])
+            want_past = any(k in qn for k in [
+                "gab es", "waren", "vergangenen", "bisherigen",
+                "im jahr", "letzten", "fruehere", "frühere", "bisher",
+            ])
+            want_next = any(k in qn for k in [
+                "naechste", "nächste", "der naechste", "der nächste",
+                "als naechstes", "als nächstes", "nur der naechste", "nur der nächste",
+                "naechstes", "nächstes",
+            ])
 
-        yr = None
-        _m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
-        if _m:
-            try:
-                yr = int(_m.group(1))
-            except ValueError:
-                yr = None
+            yr = None
+            _m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
+            if _m:
+                try:
+                    yr = int(_m.group(1))
+                except ValueError:
+                    yr = None
 
-        events = fetch_live_impuls_workshops()
-        today = datetime.now(timezone.utc).date()
-        future = [e for e in events if e.get("date") and e["date"] >= today]
-        past   = [e for e in events if e.get("date") and e["date"] <  today]
+            events = fetch_live_impuls_workshops()
+            today = datetime.now(timezone.utc).date()
+            future = [e for e in events if e.get("date") and e["date"] >= today]
+            past = [e for e in events if e.get("date") and e["date"] < today]
 
-        print(f"Y Workshops flags: want_next={want_next}, want_past={want_past}, year={yr}")
-        print(f"Y Workshops counts: future={len(future)}, past={len(past)}")
+            print(f"Y Workshops flags: want_next={want_next}, want_past={want_past}, year={yr}")
+            print(f"Y Workshops counts: future={len(future)}, past={len(past)}")
 
-        if want_next:
+            if want_next:
+                future_sorted = sorted(future, key=lambda x: x["date"])
+                events_to_show = future_sorted[:1] if future_sorted else []
+                html = render_workshops_timeline_html(
+                    events_to_show,
+                    title="Nächster Impuls-Workshop",
+                )
+                return AnswerResponse(
+                    answer=html,
+                    sources=[
+                        SourceItem(
+                            title="Impuls-Workshop-Übersicht",
+                            url="https://dlh.zh.ch/home/impuls-workshops",
+                        )
+                    ],
+                )
+
+            if want_past:
+                if yr:
+                    past = [e for e in past if e["date"].year == yr]
+                past_sorted = sorted(past, key=lambda x: x["date"], reverse=True)
+                html = render_workshops_timeline_html(
+                    past_sorted,
+                    title="Vergangene Impuls-Workshops" + (f" {yr}" if yr else ""),
+                )
+                return AnswerResponse(
+                    answer=html,
+                    sources=[
+                        SourceItem(
+                            title="Impuls-Workshop-Übersicht",
+                            url="https://dlh.zh.ch/home/impuls-workshops",
+                        )
+                    ],
+                )
+
+            # Default: alle ab heute
             future_sorted = sorted(future, key=lambda x: x["date"])
-            events_to_show = future_sorted[:1] if future_sorted else []
             html = render_workshops_timeline_html(
-                events_to_show, title="Nächster Impuls-Workshop"
+                future_sorted,
+                title="Kommende Impuls-Workshops",
             )
             return AnswerResponse(
                 answer=html,
-                sources=[SourceItem(
-                    title="Impuls-Workshop-Übersicht",
-                    url="https://dlh.zh.ch/home/impuls-workshops"
-                )]
+                sources=[
+                    SourceItem(
+                        title="Impuls-Workshop-Übersicht",
+                        url="https://dlh.zh.ch/home/impuls-workshops",
+                    )
+                ],
             )
-
-        if want_past:
-            if yr:
-                past = [e for e in past if e["date"].year == yr]
-            past_sorted = sorted(past, key=lambda x: x["date"], reverse=True)
-            html = render_workshops_timeline_html(
-                past_sorted, title="Vergangene Impuls-Workshops" + (f" {yr}" if yr else "")
-            )
-            return AnswerResponse(
-                answer=html,
-                sources=[SourceItem(
-                    title="Impuls-Workshop-Übersicht",
-                    url="https://dlh.zh.ch/home/impuls-workshops"
-                )]
-            )
-
-        # Default: alle ab heute
-        future_sorted = sorted(future, key=lambda x: x["date"])
-        html = render_workshops_timeline_html(
-            future_sorted, title="Kommende Impuls-Workshops"
-        )
-        return AnswerResponse(
-            answer=html,
-            sources=[SourceItem(
-                title="Impuls-Workshop-Übersicht",
-                url="https://dlh.zh.ch/home/impuls-workshops"
-            )]
-        )
 
         # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards)
         if any(k in q_low for k in ["innovationsfonds", "innovations-projekt", "innovationsprojekte", "projektvorstellungen"]):
@@ -1156,30 +1167,63 @@ def ask(req: QuestionRequest):
                         html = render_innovationsfonds_cards_html(
                             cards,
                             subject_title=tag_slug.capitalize(),
-                            tag_url=tag_url
+                            tag_url=tag_url,
                         )
-                        srcs = [SourceItem(title=f"Innovationsfonds – {tag_slug}", url=tag_url, snippet=f"Projekte mit Tag {tag_slug}")]
+                        srcs = [
+                            SourceItem(
+                                title=f"Innovationsfonds – {tag_slug}",
+                                url=tag_url,
+                                snippet=f"Projekte mit Tag {tag_slug}",
+                            )
+                        ]
                         # Optional: erste Projektseite als zweite Quelle
                         if cards and cards[0].get("url"):
-                            srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet","")))
-                        return AnswerResponse(answer=html, sources=srcs)        
+                            srcs.append(
+                                SourceItem(
+                                    title=cards[0]["title"],
+                                    url=cards[0]["url"],
+                                    snippet=cards[0].get("snippet", ""),
+                                )
+                            )
+                        return AnswerResponse(answer=html, sources=srcs)
 
-        # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards)
-        if "innovationsfonds" in q_low or "innovations-projekt" in q_low or "innovationsprojekte" in q_low or "projektvorstellungen" in q_low:
+        # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards) – alternative Schreibweise
+        if (
+            "innovationsfonds" in q_low
+            or "innovations-projekt" in q_low
+            or "innovationsprojekte" in q_low
+            or "projektvorstellungen" in q_low
+        ):
             tag_slug = normalize_subject_to_slug(req.question)
             if tag_slug:
                 tag_url = sitemap_find_innovations_tag(tag_slug)
                 if tag_url:
                     cards = fetch_live_innovationsfonds_cards(tag_url)
                     if cards:
-                        html = render_innovationsfonds_cards_html(cards, subject_title=tag_slug.capitalize(), tag_url=tag_url)
-                        srcs = [SourceItem(title=f"Innovationsfonds – {tag_slug}", url=tag_url, snippet=f"Projekte mit Tag {tag_slug}")]
+                        html = render_innovationsfonds_cards_html(
+                            cards,
+                            subject_title=tag_slug.capitalize(),
+                            tag_url=tag_url,
+                        )
+                        srcs = [
+                            SourceItem(
+                                title=f"Innovationsfonds – {tag_slug}",
+                                url=tag_url,
+                                snippet=f"Projekte mit Tag {tag_slug}",
+                            )
+                        ]
                         # optional: die erste Projekt-Detailseite als weitere Quelle
                         if cards and cards[0].get("url"):
-                            srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet","")))
+                            srcs.append(
+                                SourceItem(
+                                    title=cards[0]["title"],
+                                    url=cards[0]["url"],
+                                    snippet=cards[0].get("snippet", ""),
+                                )
+                            )
                         return AnswerResponse(answer=html, sources=srcs)
 
-        # LLM-Weg (wenn kein Workshop-Sonderfall gegriffen hat)
+        # LLM-Weg (wenn kein Workshop-/IF-Frühexit gegriffen hat)
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(req.question, ranked)
 
@@ -1193,15 +1237,19 @@ def ask(req: QuestionRequest):
     except Exception as e:
         print("ERROR /ask:", repr(e))
         print(format_exc())
-        msg = ("<strong>Entschuldigung, es gab einen technischen Fehler.</strong><br>"
-               "Bitte versuchen Sie es später erneut.")
+        msg = (
+            "<strong>Entschuldigung, es gab einen technischen Fehler.</strong><br>"
+            "Bitte versuchen Sie es später erneut."
+        )
         return AnswerResponse(answer=msg, sources=[])
-        
+
+
 @app.get("/debug/validate")
 def debug_validate():
     """Läuft ohne OpenAI-Call. Gut für schnelle Deploy-Checks."""
     res = validate_prompts()
     return res
+
 # -----------------------------
 # Local dev
 # -----------------------------
