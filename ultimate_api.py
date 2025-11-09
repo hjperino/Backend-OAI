@@ -886,8 +886,8 @@ def render_workshops_html(items: List[Dict]) -> str:
 
 def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
     """
-    Lädt die Innovationsfonds-Tag-Seite (z. B. .../tags/chemie) und extrahiert Karten:
-    Gibt Dicts mit title, url, snippet zurück.
+    Lädt die Innovationsfonds-Tag-Seite (z. B. .../tags/chemie) und extrahiert Projekt-Karten.
+    Ergebnis: Dicts mit title, url, snippet (kurz).
     """
     try:
         resp = requests.get(tag_url, timeout=12)
@@ -896,14 +896,11 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
+
+    # Kandidaten: alle Links, die auf Detailseiten im Innovationsfonds verweisen
+    # (keine /tags/, keine reinen Anker, keine Menüpunkte)
+    links = soup.select('main a[href*="/home/innovationsfonds/"]')
     items: List[Dict] = []
-
-    # DLH: häufig sind Projekte als 'article' / '.card' / Kachel-ähnliche Elemente markiert.
-    # Wir suchen robust nach Links, die auf Projekt-Detailseiten führen (nicht zurück auf /tags/..).
-    candidate_nodes = soup.select("main article, .cards .card, .grid article, .projects article, .projekt, .project, .teaser")
-    if not candidate_nodes:
-        candidate_nodes = soup.find_all(["article", "div", "li"])
-
     seen = set()
 
     def to_abs(href: str) -> str:
@@ -911,19 +908,31 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
             return urllib.parse.urljoin(tag_url, href)
         return href
 
-    def add_item(a_tag, ctx):
-        href = a_tag.get("href") or ""
+    for a in links:
+        href = a.get("href") or ""
         url = to_abs(href)
-        # Detailseiten haben typischerweise /home/innovationsfonds/... im Pfad
         path = urllib.parse.urlparse(url).path.lower()
-        if "/innovationsfonds" not in path or "/tags/" in path:
-            return
-        title = (a_tag.get_text(" ", strip=True) or "").strip()
-        if len(title) < 3:
-            return
-        # Kurzbeschreibung aus nahem Kontext
+
+        # Ausschlüsse: Tags-/Filter-Seiten, reine Anker, Query-only
+        if not url or url.endswith("#") or "/tags/" in path or "/uebersicht" in path:
+            continue
+        # leichte Heuristik: Detailseiten enthalten häufig /projekt/ oder tiefere Pfade
+        if "/innovationsfonds" not in path:
+            continue
+
+        title = (a.get_text(" ", strip=True) or "").strip()
+        if not title or len(title) < 3:
+            continue
+
+        # Beschreibung aus Kontext: erst im gleichen Container, dann Geschwister
+        ctx = a
+        # gehe bis zum sinnvollen Container hoch (article, card, teaser…)
+        for parent in a.parents:
+            if parent.name in ("article", "li", "div", "section"):
+                ctx = parent
+                break
+
         desc = ""
-        # p im selben Node oder in einem Geschwister
         p = ctx.find("p")
         if p and p.get_text(strip=True):
             desc = p.get_text(" ", strip=True)
@@ -934,28 +943,30 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
                 if p2 and p2.get_text(strip=True):
                     desc = p2.get_text(" ", strip=True)
         if not desc:
-            # Fallback: etwas Kontexttext
+            # Fallback: kurzer Kontext aus dem Container
             raw = ctx.get_text(" ", strip=True)
-            desc = re.sub(r"\s+", " ", raw)[:240]
+            desc = re.sub(r"\s+", " ", raw)
 
-        key = (url, title)
+        # Cleaning & Kürzen
+        desc = desc.strip()
+        # Doppelungen wie „Titel … Titel …“ vermeiden:
+        if desc.lower().startswith(title.lower()):
+            desc = desc[len(title):].lstrip(" :–-").strip()
+        if len(desc) > 260:
+            desc = desc[:257].rstrip() + "…"
+
+        key = (url, title.lower())
         if key in seen:
-            return
+            continue
         seen.add(key)
 
         items.append({
             "title": title,
             "url": url,
-            "snippet": desc[:240]
+            "snippet": desc
         })
 
-    for node in candidate_nodes:
-        a = node.find("a", href=True)
-        if not a:
-            continue
-        add_item(a, node)
-
-    # deduplizieren nach URL
+    # Dedupe nach URL; Top ~12
     dedup, seen_u = [], set()
     for it in items:
         u = it.get("url")
@@ -963,6 +974,9 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
             continue
         seen_u.add(u)
         dedup.append(it)
+        if len(dedup) >= 12:
+            break
+
     return dedup
     
 def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, tag_url: str) -> str:
