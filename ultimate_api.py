@@ -1065,7 +1065,7 @@ def ask(req: QuestionRequest):
         # Früher Exit für Workshop-Fragen: live scrapen & direkt rendern
         q_low = (req.question or "").lower()
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-         # ---------- Workshops (Impuls) – Intent & Filter ----------
+        # ---------- Workshops (Impuls) – Intent & Filter ----------
         print("Y Workshops: entered branch")
 
         def _norm(s: str) -> str:
@@ -1144,7 +1144,6 @@ def ask(req: QuestionRequest):
                 url="https://dlh.zh.ch/home/impuls-workshops"
             )]
         )
-                
 
         # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards)
         if any(k in q_low for k in ["innovationsfonds", "innovations-projekt", "innovationsprojekte", "projektvorstellungen"]):
