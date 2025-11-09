@@ -886,8 +886,8 @@ def render_workshops_html(items: List[Dict]) -> str:
 
 def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
     """
-    Lädt die Innovationsfonds-Tag-Seite (z. B. .../tags/chemie) und extrahiert Projekt-Karten.
-    Ergebnis: Dicts mit title, url, snippet (kurz).
+    Lädt die Tag-Seite (…/innovationsfonds/.../tags/<slug>) und extrahiert NUR Projekt-Detailseiten
+    als Karten (title, url, snippet). Menü-/Übersichts-/Tag-Links werden ausgeschlossen.
     """
     try:
         resp = requests.get(tag_url, timeout=12)
@@ -896,37 +896,44 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
         return []
 
     soup = BeautifulSoup(resp.text, "html.parser")
+    main = soup.select_one("main") or soup
 
-    # Kandidaten: alle Links, die auf Detailseiten im Innovationsfonds verweisen
-    # (keine /tags/, keine reinen Anker, keine Menüpunkte)
-    links = soup.select('main a[href*="/home/innovationsfonds/"]')
+    # Alle Links im Main-Bereich
+    links = main.find_all("a", href=True)
     items: List[Dict] = []
-    seen = set()
+    seen: set = set()
 
     def to_abs(href: str) -> str:
-        if href.startswith("/"):
-            return urllib.parse.urljoin(tag_url, href)
-        return href
+        return urllib.parse.urljoin(tag_url, href) if href.startswith("/") else href
+
+    EXCLUDES = (
+        "/tags/", "/uebersicht", "/projektanmeldungen", "/termine", "/jury",
+        "/genki", "/kuratiertes", "/cops", "/vernetzung",
+        "/weiterbildung", "/wb-kompass", "/fobizz"
+    )
 
     for a in links:
         href = a.get("href") or ""
         url = to_abs(href)
+        if not url or url.endswith("#"):
+            continue
+
         path = urllib.parse.urlparse(url).path.lower()
 
-        # Ausschlüsse: Tags-/Filter-Seiten, reine Anker, Query-only
-        if not url or url.endswith("#") or "/tags/" in path or "/uebersicht" in path:
+        # Nur echte Detailseiten aus dem Innovationsfonds:
+        if "/innovationsfonds/projektvorstellungen/" not in path:
             continue
-        # leichte Heuristik: Detailseiten enthalten häufig /projekt/ oder tiefere Pfade
-        if "/innovationsfonds" not in path:
+        # Menü/Tags/Übersichten etc. ausschließen:
+        if any(x in path for x in EXCLUDES):
             continue
 
+        # Titel
         title = (a.get_text(" ", strip=True) or "").strip()
         if not title or len(title) < 3:
             continue
 
-        # Beschreibung aus Kontext: erst im gleichen Container, dann Geschwister
+        # Kontext für Kurzbeschreibung: bis zu einem sinnvollen Container hoch
         ctx = a
-        # gehe bis zum sinnvollen Container hoch (article, card, teaser…)
         for parent in a.parents:
             if parent.name in ("article", "li", "div", "section"):
                 ctx = parent
@@ -943,13 +950,10 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
                 if p2 and p2.get_text(strip=True):
                     desc = p2.get_text(" ", strip=True)
         if not desc:
-            # Fallback: kurzer Kontext aus dem Container
             raw = ctx.get_text(" ", strip=True)
             desc = re.sub(r"\s+", " ", raw)
 
-        # Cleaning & Kürzen
-        desc = desc.strip()
-        # Doppelungen wie „Titel … Titel …“ vermeiden:
+        # Dopplungen entschärfen & kürzen
         if desc.lower().startswith(title.lower()):
             desc = desc[len(title):].lstrip(" :–-").strip()
         if len(desc) > 260:
@@ -960,24 +964,20 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
             continue
         seen.add(key)
 
-        items.append({
-            "title": title,
-            "url": url,
-            "snippet": desc
-        })
+        items.append({"title": title, "url": url, "snippet": desc})
 
-    # Dedupe nach URL; Top ~12
-    dedup, seen_u = [], set()
+    # Deduplizieren nach URL & limitieren
+    result, seen_urls = [], set()
     for it in items:
         u = it.get("url")
-        if not u or u in seen_u:
+        if not u or u in seen_urls:
             continue
-        seen_u.add(u)
-        dedup.append(it)
-        if len(dedup) >= 12:
+        seen_urls.add(u)
+        result.append(it)
+        if len(result) >= 12:
             break
 
-    return dedup
+    return result
     
 def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, tag_url: str) -> str:
     if not items:
