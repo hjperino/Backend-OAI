@@ -2,8 +2,8 @@
 import os
 import json
 import re
-import xml.etree.ElementTree as ET
 import urllib.parse
+import xml.etree.ElementTree as ET
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -217,7 +217,79 @@ def fetch_live_impuls_workshops() -> Optional[Dict]:
             "fetched_live": True
         }
     }
+def fetch_live_innovationsfonds_cards(tag_url: str, base_title: str = "") -> List[Dict]:
+    """
+    Lädt die Tag-Seite des Innovationsfonds (z. B. /tags/chemie) und extrahiert Projekt-Karten:
+    Rückgabe: List[Dict] mit keys: title, url, snippet
+    """
+    try:
+        resp = requests.get(tag_url, timeout=12)
+        resp.raise_for_status()
+    except Exception:
+        return []
 
+    soup = BeautifulSoup(resp.text, "html.parser")
+    items: List[Dict] = []
+
+    # a) Häufig: Karten/Artikel mit Link + kurzer Beschreibung
+    candidates = soup.select("article, .card, .project, .projekt, .projects, .cards, .grid, section div")
+    if not candidates:
+        candidates = soup.find_all(["article", "div", "li", "section"])
+
+    def add_card(a_tag, context_node):
+        href = a_tag.get("href") or ""
+        if href.startswith("/"):
+            href = urllib.parse.urljoin(tag_url, href)
+        title = (a_tag.get_text(" ", strip=True) or "").strip()
+        if len(title) < 3:
+            return
+        # Beschreibung: nächster p/span/div-Text im Kontext
+        desc = ""
+        # Gleiches Element, Eltern, oder Geschwister durchsuchen
+        for node in [context_node, context_node.find_next_sibling() if context_node else None]:
+            if not node:
+                continue
+            p = node.find("p")
+            if p and p.get_text(strip=True):
+                desc = p.get_text(" ", strip=True)
+                break
+        if not desc:
+            # Fallback: etwas Kontexttext ohne Link
+            raw = (context_node.get_text(" ", strip=True) if context_node else "")[:300]
+            desc = re.sub(r"\s+", " ", raw)
+        items.append({
+            "title": title,
+            "url": href,
+            "snippet": desc[:240]
+        })
+
+    # durchsuche Kandidaten nach Links, die wie Projekttitel aussehen
+    seen = set()
+    for cand in candidates:
+        a = cand.find("a", href=True)
+        if not a:
+            continue
+        # ignorieren, wenn Link auf dieselbe Tag-Seite zurückgeht
+        link_path = urllib.parse.urlparse(a.get("href")).path.lower()
+        if "/tags/" in link_path:
+            continue
+        key = (a.get("href"), a.get_text(strip=True))
+        if key in seen:
+            continue
+        seen.add(key)
+        add_card(a, cand)
+
+    # Dedup nach URL
+    dedup = []
+    seen_u = set()
+    for it in items:
+        u = it.get("url")
+        if not u or u in seen_u:
+            continue
+        seen_u.add(u)
+        dedup.append(it)
+
+    return dedup
 # -----------------------------
 # Live: Innovationsfonds per subject
 # -----------------------------
@@ -785,6 +857,40 @@ def render_workshops_html(items: List[Dict]) -> str:
     )
     return html      
     
+def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, tag_url: str) -> str:
+    """
+    Rendert eine Kartenliste (klickbarer Titel + Kurzbeschreibung) + Quellenabschnitt.
+    Nutzt vorhandenes Frontend-CSS (.dlh-answer .cards .card).
+    """
+    if not items:
+        return (
+            "<section class='dlh-answer'>"
+            f"<p>Derzeit wurden auf der Tag-Seite für <strong>{subject_title}</strong> keine Projekte gefunden.</p>"
+            f"<p>Bitte prüfe die <a href='{tag_url}' target='_blank'>Innovationsfonds-Übersicht</a>.</p>"
+            "</section>"
+        )
+    cards = []
+    for it in items:
+        title = it.get("title", "(ohne Titel)")
+        url = it.get("url", "#")
+        snip = (it.get("snippet") or "").strip()
+        cards.append(
+            "<article class='card'>"
+            f"<h4><a href='{url}' target='_blank'>{title}</a></h4>"
+            f"<p>{snip}</p>"
+            "</article>"
+        )
+    return (
+        "<section class='dlh-answer'>"
+        f"<p>Innovationsfonds-Projekte im Fach <strong>{subject_title}</strong>:</p>"
+        "<div class='cards'>" + "".join(cards) + "</div>"
+        "<h3>Quellen</h3>"
+        "<ul class='sources'>"
+        f"<li><a href='{tag_url}' target='_blank'>Tag-Seite: {subject_title}</a></li>"
+        "</ul>"
+        "</section>"
+    )    
+    
     # --- German month mapping + date parsing helpers ---
 GER_MONTHS = {
     "jan": 1, "januar": 1,
@@ -822,6 +928,19 @@ def _parse_german_date(text: str) -> Optional[str]:
         return datetime(year, month, day).strftime("%Y-%m-%d")
     except Exception:
         return None  
+        
+def normalize_subject_to_slug(text: str) -> Optional[str]:
+    """
+    Verwendet die globale SUBJECT_SLUGS-Tabelle, um ein Fach
+    aus der Benutzerfrage dem passenden Tag-Slug zuzuordnen.
+    """
+    if not text:
+        return None
+    t = text.lower()
+    for key, slug in SUBJECT_SLUGS.items():
+        if key in t:
+            return slug
+    return None
     
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
@@ -851,6 +970,21 @@ def ask(req: QuestionRequest):
                         )
                     )
                 return AnswerResponse(answer=html, sources=srcs)
+
+        # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards)
+        if "innovationsfonds" in q_low or "innovations-projekt" in q_low or "innovationsprojekte" in q_low or "projektvorstellungen" in q_low:
+            tag_slug = normalize_subject_to_slug(req.question)
+            if tag_slug:
+                tag_url = sitemap_find_innovations_tag(tag_slug)
+                if tag_url:
+                    cards = fetch_live_innovationsfonds_cards(tag_url)
+                    if cards:
+                        html = render_innovationsfonds_cards_html(cards, subject_title=tag_slug.capitalize(), tag_url=tag_url)
+                        srcs = [SourceItem(title=f"Innovationsfonds – {tag_slug}", url=tag_url, snippet=f"Projekte mit Tag {tag_slug}")]
+                        # optional: die erste Projekt-Detailseite als weitere Quelle
+                        if cards and cards[0].get("url"):
+                            srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet","")))
+                        return AnswerResponse(answer=html, sources=srcs)
 
         # LLM-Weg (wenn kein Workshop-Sonderfall gegriffen hat)
         system_prompt = build_system_prompt()
@@ -1231,3 +1365,15 @@ def debug_sitemap():
         "urls": len(SITEMAP_URLS),
         "sections": {k: len(v) for k, v in SITEMAP_SECTIONS.items()}
     }
+def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
+    """
+    Liefert die URL der Innovationsfonds-Tag-Seite aus der Sitemap,
+    z. B. tag_slug='chemie' → .../innovationsfonds/.../tags/chemie
+    """
+    if not SITEMAP_LOADED or not tag_slug:
+        return None
+    for u in SITEMAP_URLS:
+        p = urllib.parse.urlparse(u).path.lower()
+        if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
+            return u
+    return None
