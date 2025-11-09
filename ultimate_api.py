@@ -825,7 +825,7 @@ def _parse_german_date(text: str) -> Optional[str]:
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
-        ranked = advanced_search(req.question, max_items=req.max_sources or 12)
+        ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
         print("Y  ranked types:", [type(x).__name__ for x in ranked[:5]])
 
         # Früher Exit für Workshop-Fragen: live scrapen & direkt rendern
@@ -1080,6 +1080,8 @@ def load_and_preprocess_data():
 
 if __name__ == "__main__":
     import uvicorn
+import xml.etree.ElementTree as ET
+
     uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
 @app.on_event("startup")
 def _run_prompt_validation():
@@ -1088,3 +1090,144 @@ def _run_prompt_validation():
         print("Y  prompt validation:", _v)
     except Exception as _e:
         print("Y  prompt validation ERROR:", repr(_e))
+
+
+
+# -----------------------------------------------------------------
+# Sitemap loader + simple section index
+# -----------------------------------------------------------------
+SITEMAP_URLS: list[str] = []
+SITEMAP_SECTIONS: dict[str, list[str]] = {}
+SITEMAP_LOADED = False
+
+def load_sitemap(local_path: str = "processed/dlh_sitemap.xml") -> dict[str, int]:
+    """
+    Lädt eine Standard-XML-Sitemap, indexiert URLs und einfache Sektions-Buckets.
+    """
+    global SITEMAP_URLS, SITEMAP_SECTIONS, SITEMAP_LOADED
+    stats = {"urls": 0, "sections": 0, "ok": 0}
+    try:
+        p = Path(local_path)
+        if not p.exists():
+            print("Sitemap not found at", local_path)
+            return stats
+        tree = ET.parse(str(p))
+        root = tree.getroot()
+        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+        urls: list[str] = []
+        for u in root.findall("sm:url", ns):
+            loc = u.findtext("sm:loc", default="", namespaces=ns).strip()
+            if loc:
+                urls.append(loc)
+
+        buckets: dict[str, list[str]] = {}
+        KEYS = [
+            "impuls-workshops", "innovationsfonds", "genki", "vernetzung",
+            "weiterbildung", "kuratiertes", "cops", "wb-kompass", "fobizz", "schulalltag"
+        ]
+        for u in urls:
+            path = urllib.parse.urlparse(u).path.lower()
+            for k in KEYS:
+                if f"/{k}" in path:
+                    buckets.setdefault(k, []).append(u)
+
+        SITEMAP_URLS = urls
+        SITEMAP_SECTIONS = buckets
+        SITEMAP_LOADED = True
+        stats.update({"urls": len(urls), "sections": len(buckets), "ok": 1})
+        return stats
+    except Exception as e:
+        print("WARN: sitemap load failed:", repr(e))
+        return stats
+
+def sitemap_candidates_for_query(q: str, limit: int = 6) -> list[dict]:
+    """
+    Liefert priorisierte Kandidaten-URLs aus der Sitemap passend zur Query.
+    Formatiert als 'fake hits' wie aus dem Index (title/url/snippet/metadata.source).
+    """
+    if not SITEMAP_LOADED or not q:
+        return []
+    ql = q.lower()
+    hits: list[str] = []
+
+    if any(k in ql for k in ["impuls", "workshop"]):
+        hits += SITEMAP_SECTIONS.get("impuls-workshops", [])
+    if "innovationsfonds" in ql or "innovations" in ql:
+        hits += SITEMAP_SECTIONS.get("innovationsfonds", [])
+    if "genki" in ql:
+        hits += SITEMAP_SECTIONS.get("genki", [])
+    if "cops" in ql or "community" in ql:
+        hits += SITEMAP_SECTIONS.get("cops", [])
+    if "weiterbildung" in ql:
+        hits += SITEMAP_SECTIONS.get("weiterbildung", [])
+    if "kuratiert" in ql or "kuratiertes" in ql:
+        hits += SITEMAP_SECTIONS.get("kuratiertes", [])
+
+    seen = set()
+    out: list[dict] = []
+    for u in hits:
+        if u in seen:
+            continue
+        seen.add(u)
+        title_guess = urllib.parse.urlparse(u).path.rsplit("/", 1)[-1].replace("-", " ").strip().title() or "DLH Seite"
+        out.append({
+            "title": title_guess,
+            "url": u,
+            "snippet": "",
+            "metadata": {"source": u}
+        })
+        if len(out) >= limit:
+            break
+    return out
+
+def get_ranked_with_sitemap(query: str, max_items: int = 12) -> list[dict]:
+    """
+    Kombiniert Sitemap-Kandidaten (Boost) mit der bestehenden advanced_search.
+    Verändert advanced_search nicht; fügt nur eine Boost-Schicht davor.
+    """
+    try:
+        boosted = sitemap_candidates_for_query(query, limit=6)
+    except Exception:
+        boosted = []
+    try:
+        core = advanced_search(query, max_items=max_items)  # nutzt deine bestehende Funktion
+    except Exception:
+        core = []
+    seen = set()
+    merged: list[dict] = []
+    def key(h):
+        if isinstance(h, dict):
+            return h.get("url") or h.get("metadata", {}).get("source")
+        if isinstance(h, tuple) and len(h) >= 2 and isinstance(h[1], dict):
+            hh = h[1]
+            return hh.get("url") or hh.get("metadata", {}).get("source")
+        return None
+    for h in boosted + core:
+        u = key(h)
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        merged.append(h if isinstance(h, dict) else h[1])
+        if len(merged) >= max_items:
+            break
+    return merged
+
+
+
+@app.on_event("startup")
+def _sitemap_startup_loader():
+    try:
+        stats = load_sitemap(os.getenv("DLH_SITEMAP_PATH", "processed/dlh_sitemap.xml"))
+        print("Y  sitemap loaded:", {"urls": stats.get("urls", 0), "sections": stats.get("sections", 0)})
+    except Exception as e:
+        print("Y  sitemap load ERROR:", repr(e))
+
+
+
+@app.get("/debug/sitemap")
+def debug_sitemap():
+    return {
+        "loaded": SITEMAP_LOADED,
+        "urls": len(SITEMAP_URLS),
+        "sections": {k: len(v) for k, v in SITEMAP_SECTIONS.items()}
+    }
