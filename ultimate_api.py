@@ -293,6 +293,33 @@ def fetch_live_innovationsfonds_cards(tag_url: str, base_title: str = "") -> Lis
 # -----------------------------
 # Live: Innovationsfonds per subject
 # -----------------------------
+def normalize_subject_to_slug(text: str) -> Optional[str]:
+    """
+    Verwendet SUBJECT_SLUGS und toleriert Umlaute in der Benutzerfrage.
+    'Französisch' → 'franzoesisch' (Slug bleibt ASCII, exakt so gewünscht).
+    """
+    if not text:
+        return None
+
+    t = text.lower()
+    # grobe Normalisierung (Umlaute & ß)
+    t = (
+        t.replace("ä", "ae")
+         .replace("ö", "oe")
+         .replace("ü", "ue")
+         .replace("ß", "ss")
+    )
+
+    # zusätzlich beide Varianten prüfen (mit & ohne Umlaute)
+    candidates = {t}
+    candidates.add(text.lower())
+
+    for cand in candidates:
+        for key, slug in SUBJECT_SLUGS.items():
+            if key in cand:
+                return slug
+    return None
+
 SUBJECT_SLUGS = {
     "chemie": "chemie",
     "physik": "physik",
@@ -855,18 +882,95 @@ def render_workshops_html(items: List[Dict]) -> str:
         "</ul>"
         "</section>"
     )
-    return html      
+    return html     
+
+def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
+    """
+    Lädt die Innovationsfonds-Tag-Seite (z. B. .../tags/chemie) und extrahiert Karten:
+    Gibt Dicts mit title, url, snippet zurück.
+    """
+    try:
+        resp = requests.get(tag_url, timeout=12)
+        resp.raise_for_status()
+    except Exception:
+        return []
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    items: List[Dict] = []
+
+    # DLH: häufig sind Projekte als 'article' / '.card' / Kachel-ähnliche Elemente markiert.
+    # Wir suchen robust nach Links, die auf Projekt-Detailseiten führen (nicht zurück auf /tags/..).
+    candidate_nodes = soup.select("main article, .cards .card, .grid article, .projects article, .projekt, .project, .teaser")
+    if not candidate_nodes:
+        candidate_nodes = soup.find_all(["article", "div", "li"])
+
+    seen = set()
+
+    def to_abs(href: str) -> str:
+        if href.startswith("/"):
+            return urllib.parse.urljoin(tag_url, href)
+        return href
+
+    def add_item(a_tag, ctx):
+        href = a_tag.get("href") or ""
+        url = to_abs(href)
+        # Detailseiten haben typischerweise /home/innovationsfonds/... im Pfad
+        path = urllib.parse.urlparse(url).path.lower()
+        if "/innovationsfonds" not in path or "/tags/" in path:
+            return
+        title = (a_tag.get_text(" ", strip=True) or "").strip()
+        if len(title) < 3:
+            return
+        # Kurzbeschreibung aus nahem Kontext
+        desc = ""
+        # p im selben Node oder in einem Geschwister
+        p = ctx.find("p")
+        if p and p.get_text(strip=True):
+            desc = p.get_text(" ", strip=True)
+        if not desc:
+            sib = ctx.find_next_sibling()
+            if sib:
+                p2 = sib.find("p")
+                if p2 and p2.get_text(strip=True):
+                    desc = p2.get_text(" ", strip=True)
+        if not desc:
+            # Fallback: etwas Kontexttext
+            raw = ctx.get_text(" ", strip=True)
+            desc = re.sub(r"\s+", " ", raw)[:240]
+
+        key = (url, title)
+        if key in seen:
+            return
+        seen.add(key)
+
+        items.append({
+            "title": title,
+            "url": url,
+            "snippet": desc[:240]
+        })
+
+    for node in candidate_nodes:
+        a = node.find("a", href=True)
+        if not a:
+            continue
+        add_item(a, node)
+
+    # deduplizieren nach URL
+    dedup, seen_u = [], set()
+    for it in items:
+        u = it.get("url")
+        if not u or u in seen_u:
+            continue
+        seen_u.add(u)
+        dedup.append(it)
+    return dedup
     
 def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, tag_url: str) -> str:
-    """
-    Rendert eine Kartenliste (klickbarer Titel + Kurzbeschreibung) + Quellenabschnitt.
-    Nutzt vorhandenes Frontend-CSS (.dlh-answer .cards .card).
-    """
     if not items:
         return (
             "<section class='dlh-answer'>"
-            f"<p>Derzeit wurden auf der Tag-Seite für <strong>{subject_title}</strong> keine Projekte gefunden.</p>"
-            f"<p>Bitte prüfe die <a href='{tag_url}' target='_blank'>Innovationsfonds-Übersicht</a>.</p>"
+            f"<p>Für <strong>{subject_title}</strong> wurden aktuell keine Projektkarten gefunden.</p>"
+            f"<p>Prüfe die <a href='{tag_url}' target='_blank'>Tag-Seite</a>.</p>"
             "</section>"
         )
     cards = []
@@ -889,7 +993,7 @@ def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, ta
         f"<li><a href='{tag_url}' target='_blank'>Tag-Seite: {subject_title}</a></li>"
         "</ul>"
         "</section>"
-    )    
+    )
     
     # --- German month mapping + date parsing helpers ---
 GER_MONTHS = {
@@ -970,6 +1074,25 @@ def ask(req: QuestionRequest):
                         )
                     )
                 return AnswerResponse(answer=html, sources=srcs)
+
+        # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards)
+        if any(k in q_low for k in ["innovationsfonds", "innovations-projekt", "innovationsprojekte", "projektvorstellungen"]):
+            tag_slug = normalize_subject_to_slug(req.question)
+            if tag_slug:
+                tag_url = sitemap_find_innovations_tag(tag_slug)
+                if tag_url:
+                    cards = fetch_live_innovationsfonds_cards(tag_url)
+                    if cards:
+                        html = render_innovationsfonds_cards_html(
+                            cards,
+                            subject_title=tag_slug.capitalize(),
+                            tag_url=tag_url
+                        )
+                        srcs = [SourceItem(title=f"Innovationsfonds – {tag_slug}", url=tag_url, snippet=f"Projekte mit Tag {tag_slug}")]
+                        # Optional: erste Projektseite als zweite Quelle
+                        if cards and cards[0].get("url"):
+                            srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet","")))
+                        return AnswerResponse(answer=html, sources=srcs)        
 
         # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards)
         if "innovationsfonds" in q_low or "innovations-projekt" in q_low or "innovationsprojekte" in q_low or "projektvorstellungen" in q_low:
@@ -1377,3 +1500,22 @@ def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
         if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
             return u
     return None
+
+def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
+    """
+    Liefert die Tag-Seite für den Innovationsfonds aus der Sitemap.
+    Fallback: konstruiere die bekannte Tag-URL direkt.
+    """
+    if not tag_slug:
+        return None
+
+    # 1) Aus Sitemap
+    if SITEMAP_LOADED:
+        for u in SITEMAP_URLS:
+            p = urllib.parse.urlparse(u).path.lower()
+            if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
+                return u
+
+    # 2) Fallback (bekannte DLH-Struktur)
+    fallback = f"https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{tag_slug}"
+    return fallback
