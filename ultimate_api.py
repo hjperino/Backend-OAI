@@ -886,8 +886,8 @@ def render_workshops_html(items: List[Dict]) -> str:
 
 def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
     """
-    Lädt die Tag-Seite (…/innovationsfonds/.../tags/<slug>) und extrahiert NUR Projekt-Detailseiten
-    als Karten (title, url, snippet). Menü-/Übersichts-/Tag-Links werden ausgeschlossen.
+    Extrahiert NUR Projekt-Detailseiten (title, url, snippet) von der Tag-Seite.
+    Schließt Menü-/Tags-/Übersichten verlässlich aus.
     """
     try:
         resp = requests.get(tag_url, timeout=12)
@@ -898,14 +898,14 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
     soup = BeautifulSoup(resp.text, "html.parser")
     main = soup.select_one("main") or soup
 
-    # Alle Links im Main-Bereich
     links = main.find_all("a", href=True)
     items: List[Dict] = []
-    seen: set = set()
+    seen = set()
 
-    def to_abs(href: str) -> str:
-        return urllib.parse.urljoin(tag_url, href) if href.startswith("/") else href
+    def abs_url(h: str) -> str:
+        return urllib.parse.urljoin(tag_url, h) if h.startswith("/") else h
 
+    # harte Ausschlüsse
     EXCLUDES = (
         "/tags/", "/uebersicht", "/projektanmeldungen", "/termine", "/jury",
         "/genki", "/kuratiertes", "/cops", "/vernetzung",
@@ -914,25 +914,23 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
 
     for a in links:
         href = a.get("href") or ""
-        url = to_abs(href)
+        url = abs_url(href)
         if not url or url.endswith("#"):
             continue
 
         path = urllib.parse.urlparse(url).path.lower()
 
-        # Nur echte Detailseiten aus dem Innovationsfonds:
-        if "/innovationsfonds/projektvorstellungen/" not in path:
+        # Detailseiten des Innovationsfonds (sehr spezifisch):
+        if "/home/innovationsfonds/projektvorstellungen/" not in path:
             continue
-        # Menü/Tags/Übersichten etc. ausschließen:
         if any(x in path for x in EXCLUDES):
             continue
 
-        # Titel
         title = (a.get_text(" ", strip=True) or "").strip()
-        if not title or len(title) < 3:
+        if len(title) < 3:
             continue
 
-        # Kontext für Kurzbeschreibung: bis zu einem sinnvollen Container hoch
+        # Beschreibung aus nahegelegenem Kontext
         ctx = a
         for parent in a.parents:
             if parent.name in ("article", "li", "div", "section"):
@@ -953,7 +951,6 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
             raw = ctx.get_text(" ", strip=True)
             desc = re.sub(r"\s+", " ", raw)
 
-        # Dopplungen entschärfen & kürzen
         if desc.lower().startswith(title.lower()):
             desc = desc[len(title):].lstrip(" :–-").strip()
         if len(desc) > 260:
@@ -966,18 +963,17 @@ def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
 
         items.append({"title": title, "url": url, "snippet": desc})
 
-    # Deduplizieren nach URL & limitieren
-    result, seen_urls = [], set()
+    # dedupe + limit
+    out, seen_urls = [], set()
     for it in items:
         u = it.get("url")
         if not u or u in seen_urls:
             continue
         seen_urls.add(u)
-        result.append(it)
-        if len(result) >= 12:
+        out.append(it)
+        if len(out) >= 12:
             break
-
-    return result
+    return out
     
 def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, tag_url: str) -> str:
     if not items:
@@ -1088,6 +1084,48 @@ def ask(req: QuestionRequest):
                         )
                     )
                 return AnswerResponse(answer=html, sources=srcs)
+
+                # --- Impuls-Workshops: neue Logik mit Datumserkennung ---
+        q_low = req.question.lower()
+
+        want_past = any(k in q_low for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten"])
+        want_next = any(k in q_low for k in ["nächste", "naechste", "der nächste", "der naechste", "als nächstes", "als naechstes", "nur der nächste", "nur der naechste"])
+
+        events = fetch_live_impuls_workshops()  # deine bestehende Funktion
+        today = datetime.now(timezone.utc).date()
+        future = [e for e in events if e["date"] and e["date"] >= today]
+        past   = [e for e in events if e["date"] and e["date"] <  today]
+
+        if want_next:
+            future_sorted = sorted(future, key=lambda x: x["date"])
+            events_to_show = future_sorted[:1] if future_sorted else []
+            html = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
+            return AnswerResponse(
+                answer=html,
+                sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+            )
+
+        if want_past:
+            # optional: „im Jahr 2025“ erkennen
+            m = re.search(r"(?:jahr|jahrgang)\s*(20\d{2})", q_low)
+            if m:
+                year = int(m.group(1))
+                past = [e for e in past if e["date"].year == year]
+            past_sorted = sorted(past, key=lambda x: x["date"], reverse=True)
+            html = render_workshops_timeline_html(past_sorted, title="Vergangene Impuls-Workshops")
+            return AnswerResponse(
+                answer=html,
+                sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+            )
+
+        # default: alle ab heute
+        future_sorted = sorted(future, key=lambda x: x["date"])
+        html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops")
+        return AnswerResponse(
+            answer=html,
+            sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+        )
+                
 
         # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards)
         if any(k in q_low for k in ["innovationsfonds", "innovations-projekt", "innovationsprojekte", "projektvorstellungen"]):
