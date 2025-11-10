@@ -217,79 +217,131 @@ def fetch_live_impuls_workshops() -> Optional[Dict]:
             "fetched_live": True
         }
     }
-def fetch_live_innovationsfonds_cards(tag_url: str, base_title: str = "") -> List[Dict]:
+def fetch_live_innovationsfonds_cards(tag_url: str, max_items: int = 12) -> List[Dict]:
     """
-    Lädt die Tag-Seite des Innovationsfonds (z. B. /tags/chemie) und extrahiert Projekt-Karten:
-    Rückgabe: List[Dict] mit keys: title, url, snippet
+    Extrahiert Projektkarten (title, url, snippet) von der Tag-Seite.
+    Nur echte Detailseiten; Menü/Tags/Übersichten werden ausgeschlossen.
     """
     try:
-        resp = requests.get(tag_url, timeout=12)
-        resp.raise_for_status()
+        r = requests.get(tag_url, timeout=12)
+        r.raise_for_status()
     except Exception:
         return []
 
-    soup = BeautifulSoup(resp.text, "html.parser")
+    soup = BeautifulSoup(r.text, "html.parser")
+    main = soup.select_one("main") or soup
+
+    # Kandidaten-Links
+    links = main.find_all("a", href=True)
     items: List[Dict] = []
-
-    # a) Häufig: Karten/Artikel mit Link + kurzer Beschreibung
-    candidates = soup.select("article, .card, .project, .projekt, .projects, .cards, .grid, section div")
-    if not candidates:
-        candidates = soup.find_all(["article", "div", "li", "section"])
-
-    def add_card(a_tag, context_node):
-        href = a_tag.get("href") or ""
-        if href.startswith("/"):
-            href = urllib.parse.urljoin(tag_url, href)
-        title = (a_tag.get_text(" ", strip=True) or "").strip()
-        if len(title) < 3:
-            return
-        # Beschreibung: nächster p/span/div-Text im Kontext
-        desc = ""
-        # Gleiches Element, Eltern, oder Geschwister durchsuchen
-        for node in [context_node, context_node.find_next_sibling() if context_node else None]:
-            if not node:
-                continue
-            p = node.find("p")
-            if p and p.get_text(strip=True):
-                desc = p.get_text(" ", strip=True)
-                break
-        if not desc:
-            # Fallback: etwas Kontexttext ohne Link
-            raw = (context_node.get_text(" ", strip=True) if context_node else "")[:300]
-            desc = re.sub(r"\s+", " ", raw)
-        items.append({
-            "title": title,
-            "url": href,
-            "snippet": desc[:240]
-        })
-
-    # durchsuche Kandidaten nach Links, die wie Projekttitel aussehen
     seen = set()
-    for cand in candidates:
-        a = cand.find("a", href=True)
-        if not a:
+
+    def abs_url(href: str) -> str:
+        return urllib.parse.urljoin(tag_url, href) if href.startswith("/") else href
+
+    EXCLUDES = (
+        "/tags/", "/uebersicht", "/projektanmeldungen", "/termine", "/jury",
+        "/genki", "/kuratiertes", "/cops", "/vernetzung",
+        "/weiterbildung", "/wb-kompass", "/fobizz",
+    )
+
+    for a in links:
+        href = a.get("href") or ""
+        url = abs_url(href)
+        if not url or url.endswith("#"):
             continue
-        # ignorieren, wenn Link auf dieselbe Tag-Seite zurückgeht
-        link_path = urllib.parse.urlparse(a.get("href")).path.lower()
-        if "/tags/" in link_path:
+        path = urllib.parse.urlparse(url).path.lower()
+
+        # Nur echte Detailseiten:
+        if "/home/innovationsfonds/projektvorstellungen/" not in path:
             continue
-        key = (a.get("href"), a.get_text(strip=True))
+        if any(x in path for x in EXCLUDES):
+            continue
+
+        title = (a.get_text(" ", strip=True) or "").strip()
+        if len(title) < 3:
+            continue
+
+        # Kontext: finde eine passende Karte/Container und hole p-Text
+        ctx = a
+        for parent in a.parents:
+            if parent.name in ("article", "li", "div", "section"):
+                ctx = parent
+                break
+
+        desc = ""
+        p = ctx.find("p")
+        if p and p.get_text(strip=True):
+            desc = p.get_text(" ", strip=True)
+        if not desc:
+            sib = ctx.find_next_sibling()
+            if sib:
+                p2 = sib.find("p")
+                if p2 and p2.get_text(strip=True):
+                    desc = p2.get_text(" ", strip=True)
+        if not desc:
+            raw = ctx.get_text(" ", strip=True)
+            desc = re.sub(r"\s+", " ", raw)
+
+        # Dopplung entschärfen & kürzen
+        if desc.lower().startswith(title.lower()):
+            desc = desc[len(title):].lstrip(" :–-").strip()
+        if len(desc) > 260:
+            desc = desc[:257].rstrip() + "…"
+
+        key = (url, title.lower())
         if key in seen:
             continue
         seen.add(key)
-        add_card(a, cand)
 
-    # Dedup nach URL
-    dedup = []
-    seen_u = set()
+        items.append({"title": title, "url": url, "snippet": desc})
+
+    # Dedupe nach URL & limit
+    out, seen_u = [], set()
     for it in items:
         u = it.get("url")
         if not u or u in seen_u:
             continue
         seen_u.add(u)
-        dedup.append(it)
+        out.append(it)
+        if len(out) >= max_items:
+            break
+    # Optional: Detail-Snippets für blasse Karten (max. 5 Requests)
+    patched = 0
+    for it in out:
+        if it.get("snippet") and len(it["snippet"]) >= 60:
+            continue
+        u = it.get("url")
+        if not u:
+            continue
+        detail = _fetch_detail_snippet(u, max_chars=400)
+        if detail:
+            it["snippet"] = detail
+            patched += 1
+        if patched >= 5:
+            break
+    return out
 
-    return dedup
+def _fetch_detail_snippet(url: str, max_chars: int = 400) -> str:
+    """Holt einen kurzen Einleitungstext von der Projekt-Detailseite (best effort)."""
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+    except Exception:
+        return ""
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    main = soup.select_one("main") or soup
+
+    # Heuristik: erster sinnvoller Absatz
+    for selector in ["article p", ".content p", "main p", "p"]:
+        p = main.select_one(selector)
+        if p and p.get_text(strip=True):
+            txt = p.get_text(" ", strip=True)
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if len(txt) > 40:  # sehr kurze Platzhalter vermeiden
+                return (txt[:max_chars].rstrip() + "…") if len(txt) > max_chars else txt
+    return ""
 # -----------------------------
 # Live: Innovationsfonds per subject
 # -----------------------------
@@ -884,96 +936,6 @@ def render_workshops_html(items: List[Dict]) -> str:
     )
     return html     
 
-def fetch_live_innovationsfonds_cards(tag_url: str) -> List[Dict]:
-    """
-    Extrahiert NUR Projekt-Detailseiten (title, url, snippet) von der Tag-Seite.
-    Schließt Menü-/Tags-/Übersichten verlässlich aus.
-    """
-    try:
-        resp = requests.get(tag_url, timeout=12)
-        resp.raise_for_status()
-    except Exception:
-        return []
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    main = soup.select_one("main") or soup
-
-    links = main.find_all("a", href=True)
-    items: List[Dict] = []
-    seen = set()
-
-    def abs_url(h: str) -> str:
-        return urllib.parse.urljoin(tag_url, h) if h.startswith("/") else h
-
-    # harte Ausschlüsse
-    EXCLUDES = (
-        "/tags/", "/uebersicht", "/projektanmeldungen", "/termine", "/jury",
-        "/genki", "/kuratiertes", "/cops", "/vernetzung",
-        "/weiterbildung", "/wb-kompass", "/fobizz"
-    )
-
-    for a in links:
-        href = a.get("href") or ""
-        url = abs_url(href)
-        if not url or url.endswith("#"):
-            continue
-
-        path = urllib.parse.urlparse(url).path.lower()
-
-        # Detailseiten des Innovationsfonds (sehr spezifisch):
-        if "/home/innovationsfonds/projektvorstellungen/" not in path:
-            continue
-        if any(x in path for x in EXCLUDES):
-            continue
-
-        title = (a.get_text(" ", strip=True) or "").strip()
-        if len(title) < 3:
-            continue
-
-        # Beschreibung aus nahegelegenem Kontext
-        ctx = a
-        for parent in a.parents:
-            if parent.name in ("article", "li", "div", "section"):
-                ctx = parent
-                break
-
-        desc = ""
-        p = ctx.find("p")
-        if p and p.get_text(strip=True):
-            desc = p.get_text(" ", strip=True)
-        if not desc:
-            sib = ctx.find_next_sibling()
-            if sib:
-                p2 = sib.find("p")
-                if p2 and p2.get_text(strip=True):
-                    desc = p2.get_text(" ", strip=True)
-        if not desc:
-            raw = ctx.get_text(" ", strip=True)
-            desc = re.sub(r"\s+", " ", raw)
-
-        if desc.lower().startswith(title.lower()):
-            desc = desc[len(title):].lstrip(" :–-").strip()
-        if len(desc) > 260:
-            desc = desc[:257].rstrip() + "…"
-
-        key = (url, title.lower())
-        if key in seen:
-            continue
-        seen.add(key)
-
-        items.append({"title": title, "url": url, "snippet": desc})
-
-    # dedupe + limit
-    out, seen_urls = [], set()
-    for it in items:
-        u = it.get("url")
-        if not u or u in seen_urls:
-            continue
-        seen_urls.add(u)
-        out.append(it)
-        if len(out) >= 12:
-            break
-    return out
     
 def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, tag_url: str) -> str:
     if not items:
@@ -983,6 +945,7 @@ def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, ta
             f"<p>Prüfe die <a href='{tag_url}' target='_blank'>Tag-Seite</a>.</p>"
             "</section>"
         )
+
     cards = []
     for it in items:
         title = it.get("title", "(ohne Titel)")
@@ -990,20 +953,22 @@ def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, ta
         snip = (it.get("snippet") or "").strip()
         cards.append(
             "<article class='card'>"
-            f"<h4><a href='{url}' target='_blank'>{title}</a></h4>"
-            f"<p>{snip}</p>"
+            f"  <h4><a href='{url}' target='_blank'>{title}</a></h4>"
+            f"  <p>{snip}</p>"
             "</article>"
         )
-    return (
+
+    html = (
         "<section class='dlh-answer'>"
-        f"<p>Innovationsfonds-Projekte im Fach <strong>{subject_title}</strong>:</p>"
-        "<div class='cards'>" + "".join(cards) + "</div>"
-        "<h3>Quellen</h3>"
-        "<ul class='sources'>"
-        f"<li><a href='{tag_url}' target='_blank'>Tag-Seite: {subject_title}</a></li>"
-        "</ul>"
+        f"  <p>Innovationsfonds-Projekte im Fach <strong>{subject_title}</strong>:</p>"
+        f"  <div class='cards'>{''.join(cards)}</div>"
+        "  <h3>Quellen</h3>"
+        "  <ul class='sources'>"
+        f"    <li><a href='{tag_url}' target='_blank'>Tag-Seite: {subject_title}</a></li>"
+        "  </ul>"
         "</section>"
     )
+    return html
     
     # --- German month mapping + date parsing helpers ---
 GER_MONTHS = {
