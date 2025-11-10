@@ -342,6 +342,26 @@ def _fetch_detail_snippet(url: str, max_chars: int = 400) -> str:
             if len(txt) > 40:  # sehr kurze Platzhalter vermeiden
                 return (txt[:max_chars].rstrip() + "…") if len(txt) > max_chars else txt
     return ""
+    
+# ----------------------------------------------------------------------
+# Datum tolerant aus Event holen (unterstützt: date_obj, date, ISO, dd.mm.yyyy)
+# ----------------------------------------------------------------------
+from datetime import date as _date
+from typing import Optional
+
+def _event_to_date(e) -> Optional[_date]:
+    d = e.get("date_obj") or e.get("date")
+    if isinstance(d, datetime):
+        return d.date()
+    if isinstance(d, _date):
+        return d
+    if isinstance(d, str):
+        for fmt in ("%Y-%m-%d", "%d.%m.%Y"):
+            try:
+                return datetime.strptime(d, fmt).date()
+            except Exception:
+                pass
+    return None
 # -----------------------------
 # Live: Innovationsfonds per subject
 # -----------------------------
@@ -1062,6 +1082,42 @@ def render_workshops_timeline_html(events: list, title: str = "Impuls-Workshops"
     """
     return html
 
+# ----------------------------------------------------------------------
+# Timeline-Renderer für Impuls-Workshops
+# ----------------------------------------------------------------------
+def render_workshops_timeline_html(events: list, title: str = "Impuls-Workshops") -> str:
+    if not events:
+        return "<p>Keine Workshops gefunden.</p>"
+
+    items = []
+    for e in events:
+        d = e.get("_d") or e.get("date_obj") or e.get("date")
+        if isinstance(d, datetime):
+            date_str = d.strftime("%d.%m.%Y")
+        elif isinstance(d, _date):
+            date_str = d.strftime("%d.%m.%Y")
+        else:
+            date_str = str(d or "")
+        t = e.get("title", "Ohne Titel")
+        u = e.get("url", "#")
+        s = e.get("snippet") or e.get("summary") or ""
+        items.append(f"""<li>
+  <time>{date_str}</time>
+  <a href="{u}" target="_blank">{t}</a>
+  <div class="meta">{s}</div>
+</li>""")
+
+    return f"""<section class="dlh-answer">
+  <p><strong>{title}</strong></p>
+  <ol class="timeline">
+    {''.join(items)}
+  </ol>
+  <h3>Quellen</h3>
+  <ul class="sources">
+    <li><a href="https://dlh.zh.ch/home/impuls-workshops" target="_blank">Impuls-Workshop-Übersicht</a></li>
+  </ul>
+</section>""" 
+
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
@@ -1102,11 +1158,23 @@ def ask(req: QuestionRequest):
                     yr = int(_m.group(1))
                 except ValueError:
                     yr = None
-
+                    
+                    
             events = fetch_live_impuls_workshops()
             today = datetime.now(timezone.utc).date()
-            future = [e for e in events if e.get("date") and e["date"] >= today]
-            past = [e for e in events if e.get("date") and e["date"] < today]
+
+            events_norm = []
+            for e in events or []:
+                d = _event_to_date(e)
+                if d:
+                   ee = dict(e)
+                   ee["_d"] = d
+                   events_norm.append(ee)
+
+            future = [e for e in events_norm if e["_d"] >= today]
+            past = [e for e in events_norm if e["_d"] < today]
+
+            print(f"Y Workshops counts: future={len(future)}, past={len(past)}  (raw={len(events_norm)})")
 
             print(f"Y Workshops flags: want_next={want_next}, want_past={want_past}, year={yr}")
             print(f"Y Workshops counts: future={len(future)}, past={len(past)}")
@@ -1219,6 +1287,39 @@ def ask(req: QuestionRequest):
                             )
                         ]
                         # optional: die erste Projekt-Detailseite als weitere Quelle
+                        if cards and cards[0].get("url"):
+                            srcs.append(
+                                SourceItem(
+                                    title=cards[0]["title"],
+                                    url=cards[0]["url"],
+                                    snippet=cards[0].get("snippet", ""),
+                                )
+                            )
+                        return AnswerResponse(answer=html, sources=srcs)
+
+        # ---- Früh-Exit für Innovationsfonds (Tag-Seite -> Karten)
+        if any(k in q_low for k in ["innovationsfonds", "innovations-projekt", "innovationsprojekte", "projektvorstellungen"]):
+            tag_slug = normalize_subject_to_slug(req.question)
+            if tag_slug:
+                tag_url = sitemap_find_innovations_tag(tag_slug)
+                print(f"LIVE FETCH: Innovationsfonds subject='{tag_slug}' url={tag_url}")
+                if tag_url:
+                    cards = fetch_live_innovationsfonds_cards(tag_url)
+                    print(f"LIVE FETCH SUCCESS (Innovationsfonds): cards={len(cards) if cards else 0}")
+                    if cards:
+                        html = render_innovationsfonds_cards_html(
+                            cards,
+                            subject_title=tag_slug.capitalize(),
+                            tag_url=tag_url
+                        )
+                        srcs = [
+                            SourceItem(
+                                title=f"Innovationsfonds – {tag_slug}",
+                                url=tag_url,
+                                snippet=f"Projekte mit Tag {tag_slug}",
+                            )
+                        ]
+                        # Optional: erste Projektseite als zweite Quelle
                         if cards and cards[0].get("url"):
                             srcs.append(
                                 SourceItem(
