@@ -1020,7 +1020,48 @@ def normalize_subject_to_slug(text: str) -> Optional[str]:
         if key in t:
             return slug
     return None
-    
+
+# ----------------------------------------------------------------------
+# Timeline-Renderer für Impuls-Workshops (neuer Stil)
+# ----------------------------------------------------------------------
+def render_workshops_timeline_html(events: list, title: str = "Impuls-Workshops") -> str:
+    """Erzeugt eine strukturierte HTML-Timeline mit Datum, Titel und Link."""
+    if not events:
+        return f"<p>Keine Workshops gefunden.</p>"
+
+    items_html = ""
+    for e in events:
+        date = e.get("date")
+        if isinstance(date, datetime):
+            date_str = date.strftime("%d.%m.%Y")
+        else:
+            date_str = str(date or "")
+        title = e.get("title", "Ohne Titel")
+        url = e.get("url", "#")
+        desc = e.get("snippet") or e.get("summary") or ""
+        items_html += f"""
+        <li>
+            <time>{date_str}</time>
+            <a href="{url}" target="_blank">{title}</a>
+            <div class="meta">{desc}</div>
+        </li>
+        """
+
+    html = f"""
+    <section class="dlh-answer">
+      <p><strong>{title}</strong></p>
+      <ol class="timeline">
+        {items_html}
+      </ol>
+      <h3>Quellen</h3>
+      <ul class="sources">
+        <li><a href="https://dlh.zh.ch/home/impuls-workshops" target="_blank">
+        Impuls-Workshop-Übersicht</a></li>
+      </ul>
+    </section>
+    """
+    return html
+
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
