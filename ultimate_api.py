@@ -114,8 +114,6 @@ CHUNKS: list[dict] = load_chunks(CHUNKS_PATH)
 CHUNKS_COUNT = len(CHUNKS)
 print(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
 
-    return {"ok": True, "service": "DLH OpenAI API", "endpoints": ["/health", "/ask", "/version"]}
-
 # -----------------------------
 # Zentrale Datums-/Zeit-Parser
 # -----------------------------
