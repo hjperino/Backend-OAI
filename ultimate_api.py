@@ -1,20 +1,18 @@
-# Part 1 of ultimate_api-Kopie.py
-
 import os
 import json
 import re
 import urllib.parse
 import logging
 from datetime import datetime, timezone
-from typing import List, Dict, Optional, Tuple
+from typing import Optional
 from pathlib import Path
-from traceback import format_exc
 
 import requests
 from bs4 import BeautifulSoup
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from traceback import format_exc
 
 from pydantic_settings import BaseSettings
 from pydantic import ValidationError
@@ -25,17 +23,17 @@ from openai import OpenAI
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Use Pydantic BaseSettings for config environment variables
+# Pydantic environment config
 class Settings(BaseSettings):
     openai_api_key: str
     openai_model: str = "gpt-5"
     chunks_path: str
-
-    class Config:
-        env_file = ".env"
+    # Optionally add openai_org_id if needed:
+    # openai_org_id: Optional[str] = None
 
 try:
     settings = Settings()
+    logger.info(f"OpenAI model: {settings.openai_model}, chunks path: {settings.chunks_path}")
 except ValidationError as e:
     logger.critical(f"Environment settings validation failed: {e.json()}")
     raise
@@ -43,8 +41,7 @@ except ValidationError as e:
 # Initialize OpenAI client
 openai_client = OpenAI(
     api_key=settings.openai_api_key,
-    # Include organization if needed:
-    # organization=os.getenv("OPENAI_ORG_ID", None),
+    # organization=settings.openai_org_id,  # Uncomment and add field if needed
 )
 
 
