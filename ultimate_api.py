@@ -51,7 +51,14 @@ openai_client = OpenAI(
     api_key=os.getenv("OPENAI_API_KEY"),
     organization=os.getenv("OPENAI_ORG_ID") or None,
 )
+# --- Prompt-Budget / Trimmen ---
+# Gesamt-Budget in Zeichen für den User-Prompt (inkl. Snippets).
+# Per ENV übersteuerbar: PROMPT_CHARS_BUDGET=24000
+PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 
+# optionale Feintuning-Parameter
+MAX_HITS_IN_PROMPT   = 12   # höchstens so viele Treffer einbetten
+MAX_SNIPPET_CHARS    = 800  # pro Treffer; wird vor dem Einfügen gekürzt
 # -----------------------------
 # Load processed chunks
 # -----------------------------
@@ -617,6 +624,9 @@ def build_system_prompt() -> str:
         "  </ul>\n"
         "</section>\n"
     )
+def _truncate(s: str, n: int) -> str:
+    s = s or ""
+    return s if len(s) <= n else (s[: max(0, n - 1)] + "…")    
 def build_user_prompt(question: str, hits: List[Dict]) -> str:
     """Erzeugt den Prompt für das LLM mit Query, Datum und relevanten Textauszügen."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -627,16 +637,22 @@ def build_user_prompt(question: str, hits: List[Dict]) -> str:
         "Relevante Auszüge:"
     ]
 
-    used = 0
-    for h in hits:
-        title = h.get("metadata", {}).get("title") or h.get("title") or "Ohne Titel"
-        url = h.get("metadata", {}).get("source") or h.get("url") or ""
-        snippet = (h.get("content") or h.get("snippet") or "")[:400].replace("\n", " ").strip()
-        block = f"- {title} — {url}\n  {snippet}\n"
+    used = sum(len(p) for p in parts)  # aktueller Verbrauch
+    for h in hits[:MAX_HITS_IN_PROMPT]:
+        title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
+        url   = h.get("url")   or h.get("metadata", {}).get("source") or ""
+        snippet = (
+            h.get("snippet")
+            or h.get("content")
+            or h.get("metadata", {}).get("description")
+            or ""
+        )
+        block = f"- {title} — {url}\n  {_truncate(snippet, MAX_SNIPPET_CHARS)}\n"
         if used + len(block) > PROMPT_CHARS_BUDGET:
             break
         parts.append(block)
         used += len(block)
+
 
     parts.append(
         "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
