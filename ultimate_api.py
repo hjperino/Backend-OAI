@@ -4,7 +4,7 @@ import re
 import urllib.parse
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
 import requests
