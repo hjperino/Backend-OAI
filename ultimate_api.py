@@ -1522,6 +1522,11 @@ def debug_sitemap():
         "urls": len(SITEMAP_URLS),
         "sections": {k: len(v) for k, v in SITEMAP_SECTIONS.items()}
     }
+
+@app.get("/_kb")
+def kb_info():
+    return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(CHUNKS_PATH)}
+    
 def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
     """
     Liefert die URL der Innovationsfonds-Tag-Seite aus der Sitemap,
