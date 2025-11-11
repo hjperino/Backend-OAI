@@ -18,8 +18,24 @@ from pydantic import BaseModel
 from traceback import format_exc
 
 # --- OpenAI Client ---
+# --- OpenAI Client ---
 from openai import OpenAI
+import openai as _openai_pkg
+import bs4 as _bs4_pkg
+import lxml as _lxml_pkg
 
+# --- Dependency Versions (Debug-Ausgabe beim Start) ---
+print(
+    f"[DEPS] openai={getattr(_openai_pkg, '__version__', '?')}, "
+    f"bs4={getattr(_bs4_pkg, '__version__', '?')}, "
+    f"lxml={getattr(_lxml_pkg, '__version__', '?')}"
+)
+# --- OpenAI Konfiguration (vor späterer /ask-Route) ---
+OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+openai_client = OpenAI(
+    api_key=os.getenv("OPENAI_API_KEY"),
+    organization=os.getenv("OPENAI_ORG_ID") or None,
+)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 
 app.add_middleware(
@@ -784,6 +800,19 @@ def validate_prompts() -> dict:
 # -----------------------------
 # Endpoints
 # -----------------------------
+@app.get("/debug/deps")
+def debug_deps():
+    import platform
+    import openai as _openai_pkg
+    import bs4 as _bs4_pkg
+    import lxml as _lxml_pkg
+    return {
+        "python": platform.python_version(),
+        "openai": getattr(_openai_pkg, "__version__", "?"),
+        "bs4": getattr(_bs4_pkg, "__version__", "?"),
+        "lxml": getattr(_lxml_pkg, "__version__", "?"),
+    }
+
 @app.get("/health")
 def health():
     return {"status": "healthy", "chunks_loaded": len(CHUNKS), "model": OPENAI_MODEL}
@@ -908,76 +937,87 @@ def fetch_live_impuls_workshops() -> List[Dict]:
     except Exception as ex:
         print("LIVE FETCH ERROR (Impuls):", repr(ex))
         return []
+        
+from datetime import datetime, timezone
+import re
+
+def _event_to_date(e: dict):
+    """Versucht, aus einem Event-Dict ein date()-Objekt zu machen.
+    Akzeptiert ISO, 'DD.MM.YYYY', 'D. Mon YYYY' usw. Liefert None bei Misserfolg."""
+    if not e:
+        return None
+    # 1) Bereits dabei?
+    d = e.get("date")
+    if isinstance(d, datetime):
+        return d.date()
+    # 2) Aus Strings extrahieren
+    for key in ("date", "date_str", "when", "datum"):
+        val = e.get(key)
+        if isinstance(val, str) and val.strip():
+            s = val.strip()
+            # ISO
+            try:
+                return datetime.fromisoformat(s.replace("Z", "+00:00")).date()
+            except Exception:
+                pass
+            # DD.MM.YYYY
+            m = re.search(r"\b(\d{1,2})\.(\d{1,2})\.(20\d{2})\b", s)
+            if m:
+                try:
+                    return datetime(int(m.group(3)), int(m.group(2)), int(m.group(1))).date()
+                except Exception:
+                    pass
+            # 11. Nov 2025 / 11 Nov 2025
+            m2 = re.search(r"\b(\d{1,2})\s*([A-Za-zÄÖÜäöü]+)\s*(20\d{2})\b", s)
+            if m2:
+                mois = {
+                    "januar":"01","jan":"01","februar":"02","feb":"02","märz":"03","maerz":"03","mrz":"03",
+                    "april":"04","apr":"04","mai":"05","juni":"06","jun":"06","juli":"07","jul":"07",
+                    "august":"08","aug":"08","september":"09","sep":"09","oktober":"10","okt":"10",
+                    "november":"11","nov":"11","dezember":"12","dez":"12"
+                }
+                mm = mois.get(m2.group(2).lower())
+                if mm:
+                    try:
+                        return datetime(int(m2.group(3)), int(mm), int(m2.group(1))).date()
+                    except Exception:
+                        pass
+    return None        
     
 def render_workshops_html(items: List[Dict]) -> str:
     """Erzeugt eine kompakte HTML-Timeline mit klickbaren Titeln."""
     # Weiterleitung auf die neue Timeline-Version
     return render_workshops_timeline_html(items)
 
-def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
-    """Erzeugt schönes HTML mit Timeline-Stil."""
+def render_workshops_timeline_html(events: list[dict], title: str = "Kommende Impuls-Workshops") -> str:
+    """Erzeugt eine Timeline mit Datum + klickbaren Titeln (kompakt, valides HTML)."""
     if not events:
-        return "<p>Keine Workshops gefunden.</p>"
-
-    items = []
-    for e in events:
-        d = e.get("date")
-        if isinstance(d, datetime):
-            d = d.date()
-        date_str = d.strftime("%d.%m.%Y") if d else ""
-        t = e.get("title", "Ohne Titel")
-        url = e.get("url", "")
-        item = f"<li><time>{date_str}</time> <a href='{url}' target='_blank'>{t}</a></li>"
-        items.append(item)
-
-    html = f"""
-    <section class="dlh-answer">
-      <p>{title}:</p>
-      <ol class="timeline">
-        {''.join(items)}
-      </ol>
-      <h3>Quellen</h3>
-      <ul class="sources">
-        <li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li>
-      </ul>
-    </section>
-    """
-    return html
-  
-    if not items:
-        return ("<div class='dlh-answer'>"
-                "<p>Derzeit sind keine kommenden Impuls-Workshops gefunden worden. "
-                "Bitte prüfe die <a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Übersicht</a>.</p>"
-                "</div>")
-
-    def fmt(d: str) -> str:
-        # 'YYYY-MM-DD' -> 'DD.MM.YYYY'
-        try:
-            dt = datetime.strptime(d, "%Y-%m-%d")
-            return dt.strftime("%d.%m.%Y")
-        except Exception:
-            return d
-
-    lis = []
-    for it in items:
-        lis.append(
-            f"<li><time>{fmt(it.get('date_iso',''))}</time> "
-            f"<a href='{it.get('url','')}' target='_blank'>{it.get('title','(ohne Titel)')}</a></li>"
+        return (
+            "<section class='dlh-answer'>"
+            "<p>Keine Workshops gefunden.</p>"
+            "<h3>Quellen</h3>"
+            "<ul class='sources'><li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li></ul>"
+            "</section>"
         )
 
-    html = (
+    lis = []
+    for e in events:
+        d = e.get("_d")  # hier liegt das bereits geparste date()
+        date_str = d.strftime("%d.%m.%Y") if d else ""
+        url = e.get("url") or e.get("link") or "https://dlh.zh.ch/home/impuls-workshops"
+        t = e.get("title") or "Ohne Titel"
+        lis.append(f"<li><time>{date_str}</time> <a href='{url}' target='_blank' rel='noopener'>{t}</a></li>")
+
+    return (
         "<section class='dlh-answer'>"
-        "<p>Kommende Impuls-Workshops:</p>"
+        f"<p>{title}:</p>"
         "<ol class='timeline'>"
         + "".join(lis) +
         "</ol>"
         "<h3>Quellen</h3>"
-        "<ul class='sources'>"
-        "<li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
-        "</ul>"
+        "<ul class='sources'><li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li></ul>"
         "</section>"
     )
-    return html     
 
     
 def render_innovationsfonds_cards_html(items: List[Dict], subject_title: str, tag_url: str) -> str:
@@ -1108,38 +1148,36 @@ def render_workshops_timeline_html(events: list, title: str = "Impuls-Workshops"
 # ----------------------------------------------------------------------
 # Timeline-Renderer für Impuls-Workshops
 # ----------------------------------------------------------------------
-def render_workshops_timeline_html(events: list, title: str = "Impuls-Workshops") -> str:
+
+def render_workshops_timeline_html(events: list[dict], title: str = "Kommende Impuls-Workshops") -> str:
+    """Erzeugt eine Timeline mit Datum + klickbaren Titeln (kompakt, valides HTML)."""
     if not events:
-        return "<p>Keine Workshops gefunden.</p>"
+        return (
+            "<section class='dlh-answer'>"
+            "<p>Keine Workshops gefunden.</p>"
+            "<h3>Quellen</h3>"
+            "<ul class='sources'><li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li></ul>"
+            "</section>"
+        )
 
-    items = []
+    lis = []
     for e in events:
-        d = e.get("_d") or e.get("date_obj") or e.get("date")
-        if isinstance(d, datetime):
-            date_str = d.strftime("%d.%m.%Y")
-        elif isinstance(d, _date):
-            date_str = d.strftime("%d.%m.%Y")
-        else:
-            date_str = str(d or "")
-        t = e.get("title", "Ohne Titel")
-        u = e.get("url", "#")
-        s = e.get("snippet") or e.get("summary") or ""
-        items.append(f"""<li>
-  <time>{date_str}</time>
-  <a href="{u}" target="_blank">{t}</a>
-  <div class="meta">{s}</div>
-</li>""")
+        d = e.get("_d")  # hier liegt das bereits geparste date()
+        date_str = d.strftime("%d.%m.%Y") if d else ""
+        url = e.get("url") or e.get("link") or "https://dlh.zh.ch/home/impuls-workshops"
+        t = e.get("title") or "Ohne Titel"
+        lis.append(f"<li><time>{date_str}</time> <a href='{url}' target='_blank' rel='noopener'>{t}</a></li>")
 
-    return f"""<section class="dlh-answer">
-  <p><strong>{title}</strong></p>
-  <ol class="timeline">
-    {''.join(items)}
-  </ol>
-  <h3>Quellen</h3>
-  <ul class="sources">
-    <li><a href="https://dlh.zh.ch/home/impuls-workshops" target="_blank">Impuls-Workshop-Übersicht</a></li>
-  </ul>
-</section>""" 
+    return (
+        "<section class='dlh-answer'>"
+        f"<p>{title}:</p>"
+        "<ol class='timeline'>"
+        + "".join(lis) +
+        "</ol>"
+        "<h3>Quellen</h3>"
+        "<ul class='sources'><li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li></ul>"
+        "</section>"
+    )
 
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
@@ -1151,95 +1189,68 @@ def ask(req: QuestionRequest):
         q_low = (req.question or "").lower()
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
             # ---------- Workshops (Impuls) – Intent & Filter ----------
-            print("Y Workshops: entered branch")
-
             def _norm(s: str) -> str:
-                s = s.lower()
-                return (
-                    s.replace("ä", "ae")
-                     .replace("ö", "oe")
-                     .replace("ü", "ue")
-                     .replace("ß", "ss")
-                )
+                s = (s or "").lower()
+                return (s.replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss"))
 
             qn = _norm(req.question)
 
             want_past = any(k in qn for k in [
-                "gab es", "waren", "vergangenen", "bisherigen",
-                "im jahr", "letzten", "fruehere", "frühere", "bisher",
+                "gab es","waren","vergangenen","bisherigen","im jahr","letzten","fruehere","frühere","bisher"
             ])
             want_next = any(k in qn for k in [
-                "naechste", "nächste", "der naechste", "der nächste",
-                "als naechstes", "als nächstes", "nur der naechste", "nur der nächste",
-                "naechstes", "nächstes",
+                "naechste","nächste","der naechste","der nächste","als naechstes","als nächstes",
+                "nur der naechste","nur der nächste","naechstes","nächstes"
             ])
 
             yr = None
-            _m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
-            if _m:
+            m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
+            if m:
                 try:
-                    yr = int(_m.group(1))
-                except ValueError:
+                    yr = int(m.group(1))
+                except Exception:
                     yr = None
-                    
-                    
-            # --- Live holen & normalisieren ---
-            events = fetch_live_impuls_workshops()
+
+            raw = fetch_live_impuls_workshops() or []
+            # → robuste Normalisierung inkl. _d = date()
+            norm = []
+            for e in raw:
+                d = _event_to_date(e)
+                if d:
+                    ee = dict(e)
+                    ee["_d"] = d
+                    norm.append(ee)
+
             today = datetime.now(timezone.utc).date()
+            future = [e for e in norm if e["_d"] >= today]
+            past   = [e for e in norm if e["_d"] <  today]
 
-            events_norm: List[Dict] = []
-            for e in (events or []):
-                d = _event_to_date(e)  # erwartet: date | None
-                if not d:
-                    continue
-                e2 = dict(e)
-                # WICHTIG: zurückschreiben auf den üblichen Key "date"
-                e2["date"] = d
-                events_norm.append(e2)
+            # Branching
+            if want_next:
+                events_to_show = sorted(future, key=lambda x: x["_d"])[:1]
+                html = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
+                return AnswerResponse(
+                    answer=html,
+                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+                )
 
-            future = [e for e in events_norm if e["date"] >= today]
-            past   = [e for e in events_norm if e["date"] <  today]
+            if want_past:
+                if yr:
+                    past = [e for e in past if e["_d"].year == yr]
+                events_to_show = sorted(past, key=lambda x: x["_d"], reverse=True)
+                html = render_workshops_timeline_html(events_to_show, title=f"Vergangene Impuls-Workshops{(' '+str(yr)) if yr else ''}")
+                return AnswerResponse(
+                    answer=html,
+                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+                )
 
-            print(f"Y Workshops counts: future={len(future)}, past={len(past)}  (raw={len(events_norm)})")
-            print(f"Y Workshops flags: want_next={want_next}, want_past={want_past}, year={yr}")
-
-            # Wenn der Live-Parser nichts geliefert hat → NICHT hart abbrechen,
-            # sondern den LLM-Weg später weiterlaufen lassen.
-            if not events_norm:
-                print("LIVE FETCH empty → falling back to LLM for workshops")
-            else:
-                if want_next:
-                    future_sorted = sorted(future, key=lambda x: x["date"])
-                    events_to_show = future_sorted[:1] if future_sorted else []
-                    html = render_workshops_timeline_html(
-                        events_to_show,
-                        title="Nächster Impuls-Workshop",
-                    )
-                    return AnswerResponse(
-                        answer=html,
-                        sources=[SourceItem(
-                            title="Impuls-Workshop-Übersicht",
-                            url=IMPULS_URL,
-                        )],
-                    )
-
-                if want_past:
-                    p = past
-                    if yr:
-                        p = [e for e in p if e["date"].year == yr]
-                    past_sorted = sorted(p, key=lambda x: x["date"], reverse=True)
-                    html = render_workshops_timeline_html(
-                        past_sorted,
-                        title="Vergangene Impuls-Workshops" + (f" {yr}" if yr else ""),
-                    )
-                    return AnswerResponse(
-                        answer=html,
-                        sources=[SourceItem(
-                            title="Impuls-Workshop-Übersicht",
-                            url=IMPULS_URL,
-                        )],
-                    )
-
+            # Default: alle ab heute
+            events_to_show = sorted(future, key=lambda x: x["_d"])
+            html = render_workshops_timeline_html(events_to_show, title="Kommende Impuls-Workshops")
+            return AnswerResponse(
+                answer=html,
+                sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+            )
                 # Default: alle ab heute
                 future_sorted = sorted(future, key=lambda x: x["date"])
                 html = render_workshops_timeline_html(
@@ -1306,6 +1317,9 @@ def ask(req: QuestionRequest):
             or "innovations-projekt" in q_low
             or "innovationsprojekte" in q_low
             or "projektvorstellungen" in q_low
+            or "projekte" in q_low
+            or "innovationsfond projekte" in q_low
+            or "innovationsfonds projekte" in q_low
         ):
             tag_slug = normalize_subject_to_slug(req.question)
             if tag_slug:
@@ -1336,38 +1350,7 @@ def ask(req: QuestionRequest):
                             )
                         return AnswerResponse(answer=html, sources=srcs)
 
-        # ---- Früh-Exit für Innovationsfonds (Tag-Seite -> Karten)
-        if any(k in q_low for k in ["innovationsfonds", "innovations-projekt", "innovationsprojekte", "projektvorstellungen"]):
-            tag_slug = normalize_subject_to_slug(req.question)
-            if tag_slug:
-                tag_url = sitemap_find_innovations_tag(tag_slug)
-                print(f"LIVE FETCH: Innovationsfonds subject='{tag_slug}' url={tag_url}")
-                if tag_url:
-                    cards = fetch_live_innovationsfonds_cards(tag_url)
-                    print(f"LIVE FETCH SUCCESS (Innovationsfonds): cards={len(cards) if cards else 0}")
-                    if cards:
-                        html = render_innovationsfonds_cards_html(
-                            cards,
-                            subject_title=tag_slug.capitalize(),
-                            tag_url=tag_url
-                        )
-                        srcs = [
-                            SourceItem(
-                                title=f"Innovationsfonds – {tag_slug}",
-                                url=tag_url,
-                                snippet=f"Projekte mit Tag {tag_slug}",
-                            )
-                        ]
-                        # Optional: erste Projektseite als zweite Quelle
-                        if cards and cards[0].get("url"):
-                            srcs.append(
-                                SourceItem(
-                                    title=cards[0]["title"],
-                                    url=cards[0]["url"],
-                                    snippet=cards[0].get("snippet", ""),
-                                )
-                            )
-                        return AnswerResponse(answer=html, sources=srcs)
+
 
         # LLM-Weg (wenn kein Workshop-/IF-Frühexit gegriffen hat)
         system_prompt = build_system_prompt()
