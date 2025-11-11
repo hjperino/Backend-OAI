@@ -869,7 +869,6 @@ def root():
         "endpoints": ["/health", "/ask", "/version"]    
     }
     
-# --- Live: Impuls-Workshops robust parsen ------------------------------------
 IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops"
 
 def fetch_live_impuls_workshops() -> List[Dict]:
@@ -879,7 +878,7 @@ def fetch_live_impuls_workshops() -> List[Dict]:
         r = requests.get(IMPULS_URL, timeout=20, headers={"User-Agent": "DLH-Bot/1.1"})
         r.raise_for_status()
         html = r.text
-        soup = BeautifulSoup(html, "lxml")  # lxml ist jetzt installiert
+        soup = BeautifulSoup(html, "lxml")  # lxml ist installiert
 
         # Boilerplate raus
         for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner"]:
@@ -887,10 +886,9 @@ def fetch_live_impuls_workshops() -> List[Dict]:
                 el.decompose()
 
         root = soup.select_one("main") or soup
-
         events: List[Dict] = []
 
-        # 1) Bevorzugt <time datetime="YYYY-MM-DD"> nutzen, falls vorhanden
+        # 1) Bevorzugt <time datetime="YYYY-MM-DD"> nutzen
         for li in root.select("ol li, ul li"):
             a = li.find("a")
             t_el = li.find("time")
@@ -904,7 +902,6 @@ def fetch_live_impuls_workshops() -> List[Dict]:
             dt_date = None
             if t_el and t_el.has_attr("datetime"):
                 iso = _norm_spaces(t_el["datetime"])
-                # nur Datumsteil
                 m = re.match(r"^\s*(\d{4}-\d{2}-\d{2})", iso)
                 if m:
                     try:
@@ -916,13 +913,11 @@ def fetch_live_impuls_workshops() -> List[Dict]:
             # Fallback: Datum aus sichtbarem Text
             if not dt_date:
                 date_str = _norm_spaces(t_el.get_text(" ", strip=True) if t_el else li.get_text(" ", strip=True))
-                # nur linken Teil vor „–…“ nehmen (z. B. „11. Nov. 2025 – 17:15 Uhr“)
                 date_str = date_str.split(" - ")[0].split(" – ")[0]
                 dt = parse_de_date(date_str)
                 dt_date = dt.date() if dt else None
 
             title = _norm_spaces(a.get_text(" ", strip=True) if a else li.get_text(" ", strip=True))
-
             if dt_date and title:
                 events.append({"date": dt_date, "title": title, "url": href or IMPULS_URL})
 
@@ -950,24 +945,25 @@ def fetch_live_impuls_workshops() -> List[Dict]:
         # Deduplizieren
         seen = set()
         cleaned: List[Dict] = []
-        for e in events:
-            key = (e["date"].isoformat(), e["title"])
+        for ev in events:
+            key = (ev["date"].isoformat(), ev["title"])
             if key in seen:
                 continue
             seen.add(key)
-            cleaned.append(e)
+            cleaned.append(ev)
 
-        # Debug: wenn nichts erkannt, 1–2 Beispiele loggen
+        # Debug-Info, falls leer
         if not cleaned:
             sample_texts = []
-            for li in (root.select("ol li, ul li")[:2] or []):
+            for li in (root.select("ol li, ul li")[:3] or []):
                 sample_texts.append(_norm_spaces(li.get_text(" ", strip=True)))
             print("LIVE FETCH DEBUG (Impuls): sample items:", sample_texts)
 
         print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events)})")
         return cleaned
-    except Exception as ex:
-        print("LIVE FETCH ERROR (Impuls):", repr(ex))
+
+    except Exception as e:
+        print("LIVE FETCH ERROR (Impuls):", repr(e))
         return []
         
     # BeautifulSoup mit Fallback (falls lxml doch fehlt)
