@@ -45,7 +45,38 @@ openai_client = OpenAI(
     # organization=settings.openai_org_id,  # Uncomment and add field if needed
 )
 
-
+def get_ranked_with_sitemap(query: str, max_items: int = 12) -> list[dict]:
+    """
+    Kombiniert Sitemap-Kandidaten (Boost) mit der bestehenden advanced_search.
+    Verändert advanced_search nicht; fügt nur eine Boost-Schicht davor.
+    """
+    try:
+        boosted = sitemap_candidates_for_query(query, limit=6)
+    except Exception:
+        boosted = []
+    try:
+        core = advanced_search(query, max_items=max_items)  # nutzt deine bestehende Funktion
+    except Exception:
+        core = []
+    seen = set()
+    merged: list[dict] = []
+    def key(h):
+        if isinstance(h, dict):
+            return h.get("url") or h.get("metadata", {}).get("source")
+        if isinstance(h, tuple) and len(h) >= 2 and isinstance(h[1], dict):
+            hh = h[1]
+            return hh.get("url") or hh.get("metadata", {}).get("source")
+        return None
+    for h in boosted + core:
+        u = key(h)
+        if not u or u in seen:
+            continue
+        seen.add(u)
+        merged.append(h if isinstance(h, dict) else h[1])
+        if len(merged) >= max_items:
+            break
+    return merged
+    
 # FastAPI application setup
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 
