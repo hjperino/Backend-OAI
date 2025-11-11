@@ -800,11 +800,13 @@ def root():
         "endpoints": ["/health", "/ask", "/version"]    
     }
     
-# --- German month mapping + date parsing helpers ---
-GER_MONTHS = {
+# --- Live: Impuls-Workshops robust parsen ------------------------------------
+IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops"
+
+MONTHS = {
     "jan": 1, "januar": 1,
     "feb": 2, "februar": 2,
-    "mär": 3, "maerz": 3, "märz": 3,
+    "märz": 3, "maerz": 3, "mrz": 3,
     "apr": 4, "april": 4,
     "mai": 5,
     "jun": 6, "juni": 6,
@@ -816,134 +818,132 @@ GER_MONTHS = {
     "dez": 12, "dezember": 12,
 }
 
-def _parse_german_date(text: str) -> Optional[str]:
-    """
-    Versucht Datumsangaben wie '11 Nov. 2025', '25 Nov 2025 16:30 Uhr' etc. zu erkennen.
-    Gibt ISO 'YYYY-MM-DD' zurück oder None.
-    """
-    t = re.sub(r"\s+", " ", text or "", flags=re.I).strip()
-    # z.B. 11 Nov. 2025 17:15 Uhr – 18:00 Uhr
-    m = re.search(r"(\d{1,2})\s*\.?\s*([A-Za-zäöüÄÖÜ\.]+)\s+(\d{4})", t)
-    if not m:
-        return None
-    day = int(m.group(1))
-    mon_raw = m.group(2).lower().replace(".", "")
-    mon_raw = mon_raw.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
-    month = GER_MONTHS.get(mon_raw)
-    year = int(m.group(3))
-    if not month or not (1 <= day <= 31):
-        return None
-    try:
-        return datetime(year, month, day).strftime("%Y-%m-%d")
-    except Exception:
-        return None
+def _parse_date_de(s: str) -> Optional[datetime.date]:
+    s0 = (s or "").strip().lower().replace("–", "-")
+    # 1)  dd.mm.yyyy
+    m = re.search(r"\b(\d{1,2})\.(\d{1,2})\.(20\d{2})\b", s0)
+    if m:
+        d, mo, y = map(int, m.groups())
+        try:
+            return datetime(y, mo, d, tzinfo=timezone.utc).date()
+        except ValueError:
+            return None
+    # 2)  dd mon yyyy  (z.B. "11 nov. 2025" / "11 nov 2025")
+    m = re.search(r"\b(\d{1,2})\s*([a-zäöü\.]+)\s*(20\d{2})\b", s0)
+    if m:
+        d = int(m.group(1))
+        mon_raw = m.group(2).strip(".")
+        y = int(m.group(3))
+        mo = MONTHS.get(mon_raw, MONTHS.get(mon_raw.replace("ä","ae").replace("ö","oe").replace("ü","ue")))
+        if mo:
+            try:
+                return datetime(y, mo, d, tzinfo=timezone.utc).date()
+            except ValueError:
+                return None
+    return None
 
 def fetch_live_impuls_workshops() -> List[Dict]:
-    """
-    Holt die Workshop-Übersichtsseite live und extrahiert (Datum, Titel, Link)
-    aus dem Abschnitt 'Termine der aktuellen Impuls-Workshops'.
-    """
-    base_url = "https://dlh.zh.ch/home/impuls-workshops"
+    """Gibt eine Liste von Events zurück: [{'date': date, 'title': str, 'url': str}]"""
     try:
-        resp = requests.get(base_url, timeout=12)
-        resp.raise_for_status()
-    except Exception:
+        r = requests.get(IMPULS_URL, timeout=15, headers={"User-Agent": "DLH-Bot/1.0"})
+        r.raise_for_status()
+        html = r.text
+        soup = BeautifulSoup(html, "lxml")
+
+        # Cookie/Boilerplate verdrängen, falls stört (harmlos wenn leer)
+        for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner"]:
+            for el in soup.select(sel):
+                el.decompose()
+
+        root = soup.select_one("main") or soup
+
+        events: List[Dict] = []
+
+        # Variante A: Timeline/ol > li mit <time>
+        for li in root.select("ol li, ul li"):
+            txt = li.get_text(" ", strip=True)
+            if not txt:
+                continue
+            date_el = li.find("time")
+            date_str = (date_el.get_text(" ", strip=True) if date_el else txt)
+            dt = _parse_date_de(date_str)
+            a = li.find("a")
+            title = a.get_text(" ", strip=True) if a else txt
+            href = a.get("href") if a and a.has_attr("href") else ""
+            if href and href.startswith("/"):
+                href = urllib.parse.urljoin(IMPULS_URL, href)
+            if dt and title:
+                events.append({"date": dt, "title": title, "url": href or IMPULS_URL})
+
+        # Variante B: Fallback – Abschnitt mit Überschrift „Termine der aktuellen…“
+        if not events:
+            h_candidates = [h for h in root.select("h2, h3") if "impuls" in h.get_text(" ", strip=True).lower()]
+            for h in h_candidates:
+                sec = h.find_next(["ol","ul","section","div"]) or root
+                for li in sec.select("li"):
+                    txt = li.get_text(" ", strip=True)
+                    if not txt: 
+                        continue
+                    dt = _parse_date_de(txt)
+                    a = li.find("a")
+                    title = a.get_text(" ", strip=True) if a else txt
+                    href = a.get("href") if a and a.has_attr("href") else ""
+                    if href and href.startswith("/"):
+                        href = urllib.parse.urljoin(IMPULS_URL, href)
+                    if dt and title:
+                        events.append({"date": dt, "title": title, "url": href or IMPULS_URL})
+
+        # Deduplizieren (manchmal stehen Links doppelt)
+        seen = set()
+        cleaned = []
+        for e in events:
+            key = (e["date"].isoformat(), e["title"])
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(e)
+
+        print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events)})")
+        return cleaned
+    except Exception as ex:
+        print("LIVE FETCH ERROR (Impuls):", repr(ex))
         return []
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    results: List[Dict] = []
-
-    # Überschrift lokalisieren
-    heading = None
-    for tag in soup.find_all(["h2", "h3"]):
-        txt = " ".join(tag.get_text(" ", strip=True).split()).lower()
-        if "termine der aktuellen impuls-workshops" in txt:
-            heading = tag
-            break
-
-    def extract_from_block(node) -> Optional[Dict]:
-        """Block (node) nach Datum + Link auswerten."""
-        if not node:
-            return None
-        block_text = " ".join(node.get_text(" ", strip=True).split())
-        date_iso = _parse_german_date(block_text)
-
-        link = node.find("a", href=True)
-        if not link:
-            sib = node.find_next_sibling() if node else None
-            if sib:
-                link = sib.find("a", href=True)
-        if not link:
-            return None
-
-        href = link.get("href", "")
-        if href.startswith("/"):
-            href = urllib.parse.urljoin(base_url, href)
-
-        title = (link.get_text(" ", strip=True) or "").strip()
-        if len(title) < 6:
-            return None
-
-        if not date_iso:
-            prev_txt = ""
-            nxt_txt = ""
-            prev = node.find_previous(string=True)
-            nxt = node.find_next(string=True)
-            if prev:
-                prev_txt = " ".join(str(prev).split())
-            if nxt:
-                nxt_txt = " ".join(str(nxt).split())
-            date_iso = _parse_german_date(prev_txt) or _parse_german_date(nxt_txt)
-
-        if not date_iso:
-            return None
-
-        return {
-            "title": title,
-            "url": href,
-            "date_iso": date_iso,
-            "date_text": date_iso,
-            "snippet": block_text[:240],
-        }
-
-    candidates: List[Dict] = []
-
-    if heading is not None:
-        # Durch folgende Geschwister bis zur nächsten großen Überschrift
-        for sib in heading.find_all_next():
-            if sib.name in ("h2", "h3") and sib is not heading:
-                break
-            if sib.name in ("div", "article", "section", "li", "p"):
-                item = extract_from_block(sib)
-                if item:
-                    candidates.append(item)
-
-    # Fallback: global scannen, falls noch nichts gefunden
-    if not candidates:
-        for cont in soup.find_all(["div", "article", "section", "li", "p"]):
-            item = extract_from_block(cont)
-            if item:
-                candidates.append(item)
-
-    # Dedup + zukünftige Termine + Sortierung
-    seen: set = set()
-    deduped: List[Dict] = []
-    for r in candidates:
-        key = (r["url"], r["title"])
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(r)
-
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    future = [r for r in deduped if r["date_iso"] >= today]
-    future.sort(key=lambda x: x["date_iso"])
-
-    print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(future)} future events (raw {len(candidates)})")
-    return future
     
 def render_workshops_html(items: List[Dict]) -> str:
     """Erzeugt eine kompakte HTML-Timeline mit klickbaren Titeln."""
+    # Weiterleitung auf die neue Timeline-Version
+    return render_workshops_timeline_html(items)
+
+def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
+    """Erzeugt schönes HTML mit Timeline-Stil."""
+    if not events:
+        return "<p>Keine Workshops gefunden.</p>"
+
+    items = []
+    for e in events:
+        d = e.get("date")
+        if isinstance(d, datetime):
+            d = d.date()
+        date_str = d.strftime("%d.%m.%Y") if d else ""
+        t = e.get("title", "Ohne Titel")
+        url = e.get("url", "")
+        item = f"<li><time>{date_str}</time> <a href='{url}' target='_blank'>{t}</a></li>"
+        items.append(item)
+
+    html = f"""
+    <section class="dlh-answer">
+      <p>{title}:</p>
+      <ol class="timeline">
+        {''.join(items)}
+      </ol>
+      <h3>Quellen</h3>
+      <ul class="sources">
+        <li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li>
+      </ul>
+    </section>
+    """
+    return html
+  
     if not items:
         return ("<div class='dlh-answer'>"
                 "<p>Derzeit sind keine kommenden Impuls-Workshops gefunden worden. "
@@ -1183,60 +1183,76 @@ def ask(req: QuestionRequest):
                     yr = None
                     
                     
+            # --- Live holen & normalisieren ---
             events = fetch_live_impuls_workshops()
             today = datetime.now(timezone.utc).date()
 
-            events_norm = []
-            for e in events or []:
-                d = _event_to_date(e)
-                if d:
-                   ee = dict(e)
-                   ee["_d"] = d
-                   events_norm.append(ee)
+            events_norm: List[Dict] = []
+            for e in (events or []):
+                d = _event_to_date(e)  # erwartet: date | None
+                if not d:
+                    continue
+                e2 = dict(e)
+                # WICHTIG: zurückschreiben auf den üblichen Key "date"
+                e2["date"] = d
+                events_norm.append(e2)
 
-            future = [e for e in events_norm if e["_d"] >= today]
-            past = [e for e in events_norm if e["_d"] < today]
+            future = [e for e in events_norm if e["date"] >= today]
+            past   = [e for e in events_norm if e["date"] <  today]
 
             print(f"Y Workshops counts: future={len(future)}, past={len(past)}  (raw={len(events_norm)})")
-
             print(f"Y Workshops flags: want_next={want_next}, want_past={want_past}, year={yr}")
-            print(f"Y Workshops counts: future={len(future)}, past={len(past)}")
 
-            if want_next:
+            # Wenn der Live-Parser nichts geliefert hat → NICHT hart abbrechen,
+            # sondern den LLM-Weg später weiterlaufen lassen.
+            if not events_norm:
+                print("LIVE FETCH empty → falling back to LLM for workshops")
+            else:
+                if want_next:
+                    future_sorted = sorted(future, key=lambda x: x["date"])
+                    events_to_show = future_sorted[:1] if future_sorted else []
+                    html = render_workshops_timeline_html(
+                        events_to_show,
+                        title="Nächster Impuls-Workshop",
+                    )
+                    return AnswerResponse(
+                        answer=html,
+                        sources=[SourceItem(
+                            title="Impuls-Workshop-Übersicht",
+                            url=IMPULS_URL,
+                        )],
+                    )
+
+                if want_past:
+                    p = past
+                    if yr:
+                        p = [e for e in p if e["date"].year == yr]
+                    past_sorted = sorted(p, key=lambda x: x["date"], reverse=True)
+                    html = render_workshops_timeline_html(
+                        past_sorted,
+                        title="Vergangene Impuls-Workshops" + (f" {yr}" if yr else ""),
+                    )
+                    return AnswerResponse(
+                        answer=html,
+                        sources=[SourceItem(
+                            title="Impuls-Workshop-Übersicht",
+                            url=IMPULS_URL,
+                        )],
+                    )
+
+                # Default: alle ab heute
                 future_sorted = sorted(future, key=lambda x: x["date"])
-                events_to_show = future_sorted[:1] if future_sorted else []
                 html = render_workshops_timeline_html(
-                    events_to_show,
-                    title="Nächster Impuls-Workshop",
+                    future_sorted,
+                    title="Kommende Impuls-Workshops",
                 )
                 return AnswerResponse(
                     answer=html,
-                    sources=[
-                        SourceItem(
-                            title="Impuls-Workshop-Übersicht",
-                            url="https://dlh.zh.ch/home/impuls-workshops",
-                        )
-                    ],
+                    sources=[SourceItem(
+                        title="Impuls-Workshop-Übersicht",
+                        url=IMPULS_URL,
+                    )],
                 )
-
-            if want_past:
-                if yr:
-                    past = [e for e in past if e["date"].year == yr]
-                past_sorted = sorted(past, key=lambda x: x["date"], reverse=True)
-                html = render_workshops_timeline_html(
-                    past_sorted,
-                    title="Vergangene Impuls-Workshops" + (f" {yr}" if yr else ""),
-                )
-                return AnswerResponse(
-                    answer=html,
-                    sources=[
-                        SourceItem(
-                            title="Impuls-Workshop-Übersicht",
-                            url="https://dlh.zh.ch/home/impuls-workshops",
-                        )
-                    ],
-                )
-
             # Default: alle ab heute
             future_sorted = sorted(future, key=lambda x: x["date"])
             html = render_workshops_timeline_html(
