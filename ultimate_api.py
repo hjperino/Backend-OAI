@@ -1,9 +1,26 @@
 # DLH Chatbot API (OpenAI) — full file
+import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Replace all print:
+print("Failed to load chunks", e)
+# With:
+logger.error("Failed to load chunks: %s", e)
 import os
 import json
 import re
 import urllib.parse
 import xml.etree.ElementTree as ET
+from pydantic import BaseSettings
+class Settings(BaseSettings):
+    openai_api_key: str
+    openai_model: str = "gpt-5"
+    chunks_path: str
+
+    class Config:
+        env_file = ".env"
+settings = Settings()
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -24,6 +41,11 @@ import openai as _openai_pkg
 import bs4 as _bs4_pkg
 import lxml as _lxml_pkg
 
+required_env = ["OPENAI_API_KEY", "OPENAI_MODEL", "CHUNKS_PATH"]
+missing = [v for v in required_env if not os.getenv(v)]
+if missing:
+    raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+    
 # --- Dependency Versions (Debug-Ausgabe beim Start) ---
 print(
     f"[DEPS] openai={getattr(_openai_pkg, '__version__', '?')}, "
@@ -135,10 +157,14 @@ MONTHS_DE = {
 TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:\.]([0-5]\d)\b")
 DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")  # 11.11.2025 / 11.11.25
 DMY_TEXT_RE = re.compile(
-    r"\b(\d{1,2})\.\s*([A-Za-zÄÖÜäöüß]+)\s*(20\d{2}|\d{2})?\b"    # 25. Nov 2025 / 25. November
+    r"\b(\d{1,2})\.\s*("
+    r"jan(?:uar)?|feb(?:ruar)?|mär|maer|märz|maerz|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|"
+    r"aug(?:ust)?|sep|sept|sept(?:ember)?|okt(?:ober)?|nov(?:ember)?|dez(?:ember)?"
+    r")\b\.?\s*(?:\b(20\d{2})\b)?",
+    re.IGNORECASE,
 )
 
-def _coerce_year(y: Optional[str], ref_year: int) -> int:
+def coerceyear(y: Optional[str], refyear: int) -> int:
     if not y:
         return ref_year
     y = y.strip()
@@ -150,18 +176,21 @@ def _coerce_year(y: Optional[str], ref_year: int) -> int:
     except Exception:
         return ref_year
 
+NBSP_RE = re.compile(r"[\u00A0\u202F]+")   # NBSP / Narrow NBSP
+
+def _norm_spaces(s: str) -> str:
+    return NBSP_RE.sub(" ", (s or "")).strip()
+
+def _strip_month_dot(s: str) -> str:
+    # „Nov.“ -> „Nov“, „Mär.“ -> „Mär“ etc.
+    return re.sub(r"\b([A-Za-zÄÖÜäöü]{3,})\.\b", r"\1", s)
+
 def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[datetime]:
-    """
-    Versucht ein Datum (und ggf. Uhrzeit) aus deutschem Text zu extrahieren.
-    Unterstützt:
-      - 11.11.2025  /  11.11.25
-      - 25. Nov 2025  /  25. November
-      - Uhrzeit optional: "16:30", "16.30"
-    Rückgabe: datetime (UTC-nahe, Datum + Zeit 00:00/HH:MM) oder None.
-    """
     if not text:
         return None
-    t = text.strip()
+    t = _norm_spaces(text)
+    t = _strip_month_dot(t)
+    t = t.replace("–", "-")  # En-Dash -> Hypen
     rd = ref_date or datetime.now(timezone.utc)
     ref_year = rd.year
 
@@ -237,7 +266,7 @@ def parse_de_date_text(txt: str) -> Optional[datetime]:
 # -----------------------------
 # Live: Impuls-Workshops
 # -----------------------------
-def dedupe_items(items, key=lambda x: (x.get('title','').lower().strip(), x.get('when',''))):
+def dedupeitems(items: list, key=lambda x: x.get("title", "").lower().strip, seen: set = set()) -> list:
     seen = set()
     out = []
     for it in items:
@@ -304,10 +333,16 @@ def fallback_events_from_chunks() -> List[Dict]:
     uniq.sort(key=lambda x: x["date"])
     return uniq    
 
-def fetch_live_innovationsfonds_cards(tag_url: str, max_items: int = 12) -> List[Dict]:
+def fetchliveinnovationsfondscards(tagurl: str, maxitems: int = 12) -> list:
     """
-    Extrahiert Projektkarten (title, url, snippet) von der Tag-Seite.
-    Nur echte Detailseiten; Menü/Tags/Übersichten werden ausgeschlossen.
+    Extract project cards from a tag URL.
+
+    Args:
+        tagurl: The URL of the tag page.
+        maxitems: Maximum number of cards to return.
+
+    Returns:
+        List of dicts with project info.
     """
     try:
         r = requests.get(tag_url, timeout=12)
@@ -383,16 +418,7 @@ def fetch_live_innovationsfonds_cards(tag_url: str, max_items: int = 12) -> List
 
         items.append({"title": title, "url": url, "snippet": desc})
 
-    # Dedupe nach URL & limit
-    out, seen_u = [], set()
-    for it in items:
-        u = it.get("url")
-        if not u or u in seen_u:
-            continue
-        seen_u.add(u)
-        out.append(it)
-        if len(out) >= max_items:
-            break
+
     # Optional: Detail-Snippets für blasse Karten (max. 5 Requests)
     patched = 0
     for it in out:
@@ -408,7 +434,19 @@ def fetch_live_innovationsfonds_cards(tag_url: str, max_items: int = 12) -> List
         if patched >= 5:
             break
     return out
-
+def deduplicate_by_keys(items: list, keys: list) -> list:
+    """
+    Remove duplicates from items list, based on specified keys.
+    """
+    seen = set()
+    out = []
+    for it in items:
+        composite = tuple(it.get(k) for k in keys)
+        if composite in seen:
+            continue
+        seen.add(composite)
+        out.append(it)
+    return out
 def _fetch_detail_snippet(url: str, max_chars: int = 400) -> str:
     """Holt einen kurzen Einleitungstext von der Projekt-Detailseite (best effort)."""
     try:
@@ -835,28 +873,103 @@ def root():
 IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops"
 
 def fetch_live_impuls_workshops() -> List[Dict]:
-    """
-    Liefert normalisierte Events:
-      [
-        {
-          "title": str,
-          "url": str,
-          "when": str,          # Roh-Text aus der Seite (z.B. "11. Nov 2025, 17:15–18:00")
-          "date": datetime,     # geparstes Datum (UTC, mit Uhrzeit falls vorhanden)
-          "_d": date            # nur Datum (für einfache Vergleiche/Sortierung)
-        },
-        ...
-      ]
-    """
-    UA = {"User-Agent": "DLH-Chatbot/1.0 (+https://dlh.zh.ch)"}
+    """Parst die Impuls-Workshop-Seite und gibt Events als
+    [{'date': date, 'title': str, 'url': str}] zurück."""
     try:
-        r = requests.get(IMPULS_URL, timeout=20, headers=UA, allow_redirects=True)
+        r = requests.get(IMPULS_URL, timeout=20, headers={"User-Agent": "DLH-Bot/1.1"})
         r.raise_for_status()
         html = r.text
-    except Exception as ex:
-        print("LIVE FETCH ERROR (Impuls, GET):", repr(ex))
-        return []
+        soup = BeautifulSoup(html, "lxml")  # lxml ist jetzt installiert
 
+        # Boilerplate raus
+        for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner"]:
+            for el in soup.select(sel):
+                el.decompose()
+
+        root = soup.select_one("main") or soup
+
+        events: List[Dict] = []
+
+        # 1) Bevorzugt <time datetime="YYYY-MM-DD"> nutzen, falls vorhanden
+        for li in root.select("ol li, ul li"):
+            a = li.find("a")
+            t_el = li.find("time")
+            href = ""
+            if a and a.has_attr("href"):
+                href = a["href"]
+                if href.startswith("/"):
+                    href = urllib.parse.urljoin(IMPULS_URL, href)
+
+            # Datum aus datetime-Attribut
+            dt_date = None
+            if t_el and t_el.has_attr("datetime"):
+                iso = _norm_spaces(t_el["datetime"])
+                # nur Datumsteil
+                m = re.match(r"^\s*(\d{4}-\d{2}-\d{2})", iso)
+                if m:
+                    try:
+                        y, mth, d = map(int, m.group(1).split("-"))
+                        dt_date = datetime(y, mth, d, tzinfo=timezone.utc).date()
+                    except Exception:
+                        dt_date = None
+
+            # Fallback: Datum aus sichtbarem Text
+            if not dt_date:
+                date_str = _norm_spaces(t_el.get_text(" ", strip=True) if t_el else li.get_text(" ", strip=True))
+                # nur linken Teil vor „–…“ nehmen (z. B. „11. Nov. 2025 – 17:15 Uhr“)
+                date_str = date_str.split(" - ")[0].split(" – ")[0]
+                dt = parse_de_date(date_str)
+                dt_date = dt.date() if dt else None
+
+            title = _norm_spaces(a.get_text(" ", strip=True) if a else li.get_text(" ", strip=True))
+
+            if dt_date and title:
+                events.append({"date": dt_date, "title": title, "url": href or IMPULS_URL})
+
+        # 2) Fallback: in Sektionen nach Überschriften mit „Impuls“ suchen
+        if not events:
+            heads = [h for h in root.select("h2, h3") if "impuls" in h.get_text(" ", strip=True).lower()]
+            for h in heads:
+                sec = h.find_next(["ol", "ul", "section", "div"]) or root
+                for li in sec.select("li"):
+                    a = li.find("a")
+                    href = ""
+                    if a and a.has_attr("href"):
+                        href = a["href"]
+                        if href.startswith("/"):
+                            href = urllib.parse.urljoin(IMPULS_URL, href)
+
+                    txt = _norm_spaces(li.get_text(" ", strip=True))
+                    date_part = txt.split(" - ")[0].split(" – ")[0]
+                    dt = parse_de_date(date_part)
+                    if not dt:
+                        continue
+                    title = _norm_spaces(a.get_text(" ", strip=True) if a else txt)
+                    events.append({"date": dt.date(), "title": title, "url": href or IMPULS_URL})
+
+        # Deduplizieren
+        seen = set()
+        cleaned: List[Dict] = []
+        for e in events:
+            key = (e["date"].isoformat(), e["title"])
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(e)
+
+        # Debug: wenn nichts erkannt, 1–2 Beispiele loggen
+        if not cleaned:
+            sample_texts = []
+            for li in (root.select("ol li, ul li")[:2] or []):
+                sample_texts.append(_norm_spaces(li.get_text(" ", strip=True)))
+            print("LIVE FETCH DEBUG (Impuls): sample items:", sample_texts)
+
+        print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events)})")
+        return cleaned
+    except Exception as ex:
+        print("LIVE FETCH ERROR (Impuls):", repr(ex))
+        return []
+        
     # BeautifulSoup mit Fallback (falls lxml doch fehlt)
     try:
         soup = BeautifulSoup(html, "lxml")
