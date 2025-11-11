@@ -1,26 +1,10 @@
-# DLH Chatbot API (OpenAI) — full file
-import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Part 1 of ultimate_api-Kopie.py
 
-# Replace all print:
-print("Failed to load chunks", e)
-# With:
-logger.error("Failed to load chunks: %s", e)
 import os
 import json
 import re
 import urllib.parse
-import xml.etree.ElementTree as ET
-from pydantic import BaseSettings
-class Settings(BaseSettings):
-    openai_api_key: str
-    openai_model: str = "gpt-5"
-    chunks_path: str
-
-    class Config:
-        env_file = ".env"
-settings = Settings()
+import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -28,47 +12,50 @@ from pathlib import Path
 import requests
 from bs4 import BeautifulSoup
 
-# --- Framework-Basis: FastAPI, Pydantic, CORS, Logging ---
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, BaseSettings, ValidationError
 from traceback import format_exc
 
-# --- OpenAI Client ---
-# --- OpenAI Client ---
 from openai import OpenAI
-import openai as _openai_pkg
-import bs4 as _bs4_pkg
-import lxml as _lxml_pkg
 
-required_env = ["OPENAI_API_KEY", "OPENAI_MODEL", "CHUNKS_PATH"]
-missing = [v for v in required_env if not os.getenv(v)]
-if missing:
-    raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
-    
-# --- Dependency Versions (Debug-Ausgabe beim Start) ---
-print(
-    f"[DEPS] openai={getattr(_openai_pkg, '__version__', '?')}, "
-    f"bs4={getattr(_bs4_pkg, '__version__', '?')}, "
-    f"lxml={getattr(_lxml_pkg, '__version__', '?')}"
-)
-# --- OpenAI Konfiguration (vor späterer /ask-Route) ---
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
+# Setup logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Use Pydantic BaseSettings for config environment variables
+class Settings(BaseSettings):
+    openai_api_key: str
+    openai_model: str = "gpt-5"
+    chunks_path: str
+
+    class Config:
+        env_file = ".env"
+
+try:
+    settings = Settings()
+except ValidationError as e:
+    logger.critical(f"Environment settings validation failed: {e.json()}")
+    raise
+
+# Initialize OpenAI client
 openai_client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    organization=os.getenv("OPENAI_ORG_ID") or None,
+    api_key=settings.openai_api_key,
+    # Note: Add organization support if needed
 )
+
+# FastAPI application setup
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],            # oder: ["https://perino.info","https://www.perino.info"]
-    allow_credentials=False,        # bei "*" muss das False sein
+    allow_origins=["*"],  # Adjust to your needs
+    allow_credentials=False,  # False if allow_origins=["*"]
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# --- Pydantic-Modelle ---
+# Pydantic models for API
 class SourceItem(BaseModel):
     title: Optional[str] = None
     url: Optional[str] = None
@@ -83,62 +70,38 @@ class QuestionRequest(BaseModel):
     language: Optional[str] = "de"
     max_sources: Optional[int] = 3
 
-# --- OpenAI Konfiguration (vor späterer /ask-Route) ---
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-5")
-openai_client = OpenAI(
-    api_key=os.getenv("OPENAI_API_KEY"),
-    organization=os.getenv("OPENAI_ORG_ID") or None,
-)
-# --- Prompt-Budget / Trimmen ---
-# Gesamt-Budget in Zeichen für den User-Prompt (inkl. Snippets).
-# Per ENV übersteuerbar: PROMPT_CHARS_BUDGET=24000
-PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
-
-# optionale Feintuning-Parameter
-MAX_HITS_IN_PROMPT   = 12   # höchstens so viele Treffer einbetten
-MAX_SNIPPET_CHARS    = 800  # pro Treffer; wird vor dem Einfügen gekürzt
-# -----------------------------
-# Load processed chunks
-# -----------------------------
-# --- KB loading (supports .json and .jsonl) ---
-# --- Knowledge Base loading (supports .json and .jsonl) ---
-from pathlib import Path
-
-CHUNKS_PATH = os.getenv("CHUNKS_PATH", "processed/processed_chunks.json")
-
-def load_chunks(path: str):
-    """Lädt die Wissensbasis (.json oder .jsonl) sicher und robust."""
+# Load knowledge base chunks, support .json and .jsonl formats
+def load_chunks(path: str) -> List[Dict]:
     p = Path(path)
     if not p.exists():
-        print(f"⚠️ KB not found at {p.resolve()}")
+        logger.warning(f"⚠️ KB not found at {p.resolve()}")
         return []
-    if p.suffix == ".jsonl":
-        out = []
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    continue
-        return out
-    else:
-        try:
-            return json.load(p.open("r", encoding="utf-8"))
-        except Exception as e:
-            print("Failed to load chunks:", e)
-            return []
 
-# Datei laden
-CHUNKS: list[dict] = load_chunks(CHUNKS_PATH)
-CHUNKS_COUNT = len(CHUNKS)
-print(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
+    try:
+        if p.suffix == ".jsonl":
+            out = []
+            with p.open("r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    try:
+                        out.append(json.loads(line))
+                    except json.JSONDecodeError as e:
+                        logger.debug(f"Skipping bad JSON line in chunks: {e}")
+            return out
+        else:
+            with p.open("r", encoding="utf-8") as f:
+                return json.load(f)
+    except Exception as e:
+        logger.error(f"Failed to load chunks: {e}")
+        return []
 
-# -----------------------------
-# Zentrale Datums-/Zeit-Parser
-# -----------------------------
+CHUNKS: List[Dict] = load_chunks(settings.chunks_path)
+logger.info(f"✅ Loaded {len(CHUNKS)} chunks from {settings.chunks_path}")
+
+# Part 2 of ultimate_api-Kopie.py
+
 MONTHS_DE = {
     "januar": 1, "jan": 1,
     "februar": 2, "feb": 2,
@@ -155,16 +118,13 @@ MONTHS_DE = {
 }
 
 TIME_RE = re.compile(r"\b([01]?\d|2[0-3])[:\.]([0-5]\d)\b")
-DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")  # 11.11.2025 / 11.11.25
+DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
 DMY_TEXT_RE = re.compile(
-    r"\b(\d{1,2})\.\s*("
-    r"jan(?:uar)?|feb(?:ruar)?|mär|maer|märz|maerz|apr(?:il)?|mai|jun(?:i)?|jul(?:i)?|"
-    r"aug(?:ust)?|sep|sept|sept(?:ember)?|okt(?:ober)?|nov(?:ember)?|dez(?:ember)?"
-    r")\b\.?\s*(?:\b(20\d{2})\b)?",
+    r"\b(\d{1,2})\.\s*([A-Za-zÄÖÜäöüß]+)\s*(20\d{2}|\d{2})?\b",
     re.IGNORECASE,
 )
 
-def coerceyear(y: Optional[str], refyear: int) -> int:
+def _coerce_year(y: Optional[str], ref_year: int) -> int:
     if not y:
         return ref_year
     y = y.strip()
@@ -176,99 +136,76 @@ def coerceyear(y: Optional[str], refyear: int) -> int:
     except Exception:
         return ref_year
 
-NBSP_RE = re.compile(r"[\u00A0\u202F]+")   # NBSP / Narrow NBSP
-
-def _norm_spaces(s: str) -> str:
-    return NBSP_RE.sub(" ", (s or "")).strip()
-
-def _strip_month_dot(s: str) -> str:
-    # „Nov.“ -> „Nov“, „Mär.“ -> „Mär“ etc.
-    return re.sub(r"\b([A-Za-zÄÖÜäöü]{3,})\.\b", r"\1", s)
-
 def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[datetime]:
+    """
+    Extracts a date (with optional time) from German text.
+    Returns UTC-based datetime or None.
+    Supports:
+    - 11.11.2025 or 11.11.25
+    - 25. Nov 2025 or 25. November
+    - optional time like 16:30 or 16.30
+    """
     if not text:
         return None
-    t = _norm_spaces(text)
-    t = _strip_month_dot(t)
-    t = t.replace("–", "-")  # En-Dash -> Hypen
+    t = text.strip()
     rd = ref_date or datetime.now(timezone.utc)
     ref_year = rd.year
 
-    # 1) 11.11.2025
-    m = DMY_DOTTED_RE.search(t)
+    # Time extraction
     hh, mm = None, None
     tm = TIME_RE.search(t)
     if tm:
         hh, mm = int(tm.group(1)), int(tm.group(2))
+
+    # Pattern 1: dotted date 11.11.2025
+    m = DMY_DOTTED_RE.search(t)
     if m:
-        d = int(m.group(1)); mth = int(m.group(2)); y = _coerce_year(m.group(3), ref_year)
         try:
+            d, mth, y = int(m.group(1)), int(m.group(2)), _coerce_year(m.group(3), ref_year)
             base = datetime(y, mth, d, tzinfo=timezone.utc)
-            if hh is not None: base = base.replace(hour=hh, minute=mm or 0)
+            if hh is not None:
+                base = base.replace(hour=hh, minute=mm or 0)
             return base
         except Exception:
             pass
 
-    # 2) 25. Nov 2025  /  25. November  (Jahr optional)
+    # Pattern 2: textual month date (e.g. 25. Nov 2025)
     m = DMY_TEXT_RE.search(t)
     if m:
-        d = int(m.group(1))
-        month_word = (m.group(2) or "").strip().lower().replace("ä","ae").replace("ö","oe").replace("ü","ue")
-        mth = MONTHS_DE.get(month_word)
-        y = _coerce_year(m.group(3), ref_year)
-        if mth:
-            try:
+        try:
+            d = int(m.group(1))
+            month_word = (m.group(2) or "").strip().lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+            mth = MONTHS_DE.get(month_word)
+            y = _coerce_year(m.group(3), ref_year)
+            if mth:
                 base = datetime(y, mth, d, tzinfo=timezone.utc)
-                if hh is not None: base = base.replace(hour=hh, minute=mm or 0)
+                if hh is not None:
+                    base = base.replace(hour=hh, minute=mm or 0)
                 return base
-            except Exception:
-                pass
+        except Exception:
+            pass
 
     return None
-    
+
 from datetime import date as _date
 
 def parse_de_date_to_date(text: str) -> Optional[_date]:
     """
-    Nutzt parse_de_date(...) und gibt ein datetime.date (ohne Uhrzeit) zurück.
+    Helper to parse German date string and return datetime.date.
     """
     dt = parse_de_date(text)
     return dt.date() if dt else None
     
-def _normalize_dash(s: str) -> str:
-    return s.replace("\u2013", "-").replace("\u2014", "-").replace("–","-").replace("—","-")
+# Part 3 of ultimate_api-Kopie.py
 
-def parse_de_date_text(txt: str) -> Optional[datetime]:
-    if not txt:
-        return None
-    s = _normalize_dash(txt.lower().strip())
-    s = s.replace("uhr", "").replace(",", " ")
-    m = re.search(r"(\d{1,2})\s*(?:\.\s*)?(jan|januar|feb|februar|maerz|märz|mrz|maer|mar|april|apr|mai|jun|juni|jul|juli|aug|august|sep|sept|september|okt|oktober|nov|november|dez|dezember)\s*(\d{4})", s)
-    if m:
-        day = int(m.group(1))
-        mon = m.group(2)
-        month = DE_MONTHS.get(mon, None)
-        year = int(m.group(3))
-    else:
-        m2 = re.search(r"(\d{1,2})\.(\d{1,2})\.(\d{4})", s)
-        if not m2:
-            return None
-        day, month, year = int(m2.group(1)), int(m2.group(2)), int(m2.group(3))
-    tmatch = re.search(r"(\d{1,2}):(\d{2})", s)
-    hh, mm = (0, 0)
-    if tmatch:
-        hh, mm = int(tmatch.group(1)), int(tmatch.group(2))
-    try:
-        return datetime(year, month, day, hh, mm, tzinfo=timezone.utc)
-    except Exception:
-        return None
+from typing import Set
 
-# -----------------------------
-# Live: Impuls-Workshops
-# -----------------------------
-def dedupeitems(items: list, key=lambda x: x.get("title", "").lower().strip, seen: set = set()) -> list:
-    seen = set()
-    out = []
+def dedupe_items(
+    items: List[Dict],
+    key=lambda x: (x.get("title", "").lower().strip(), x.get("when", ""))
+) -> List[Dict]:
+    seen: Set = set()
+    out: List[Dict] = []
     for it in items:
         k = key(it)
         if k in seen:
@@ -277,734 +214,55 @@ def dedupeitems(items: list, key=lambda x: x.get("title", "").lower().strip, see
         out.append(it)
     return out
 
-
-    # 3) fallback-Heuristik: suche einfach alle <a> in section mit Datum im Umfeld
-    if not events:
-        for a in section.find_all("a"):
-            around = (a.get_text(" ", strip=True) + " " +
-                      (a.find_parent().get_text(" ", strip=True) if a.find_parent() else ""))
-            d = parse_de_date_to_date(around)
-            if d:
-                events.append({
-                    "date": d,
-                    "title": a.get_text(" ", strip=True),
-                    "url": urllib.parse.urljoin(url, a.get("href",""))
-                })
-
-    # 4) deduplizieren und sortieren
-    seen = set()
-    uniq: List[Dict] = []
-    for e in events:
-        key = (e.get("date"), e.get("title"))
-        if key in seen:
-            continue
-        seen.add(key)
-        uniq.append(e)
-
-    uniq.sort(key=lambda x: x.get("date") or datetime(2100,1,1, tzinfo=timezone.utc).date())
-    print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(uniq)} events (raw {len(events)})")
-    return uniq
-    
-def fallback_events_from_chunks() -> List[Dict]:
-    """Wenn live 0 liefert: versuche Events aus CHUNKS zu ziehen."""
-    out: List[Dict] = []
-    for ch in CHUNKS[:1000]:  # safety
-        src = (ch.get("metadata") or {}).get("source","") or ch.get("url","")
-        if "impuls-workshops" not in (src or ""):
-            continue
-        text = ch.get("content") or ch.get("snippet") or ""
-        # naive Suche nach Zeilen mit Datum + Titel
-        for line in text.split("\n"):
-            d = parse_de_date_to_date(line)
-            if d:
-                # Titel heuristisch: Rest der Zeile
-                title = re.sub(r".*?(20\d{2})\s*", "", line).strip()
-                if title:
-                    out.append({"date": d, "title": title, "url": src})
-    # dedup + sort
-    seen = set()
-    uniq = []
-    for e in out:
-        k = (e["date"], e["title"])
-        if k in seen:
-            continue
-        seen.add(k)
-        uniq.append(e)
-    uniq.sort(key=lambda x: x["date"])
-    return uniq    
-
-def fetchliveinnovationsfondscards(tagurl: str, maxitems: int = 12) -> list:
-    """
-    Extract project cards from a tag URL.
-
-    Args:
-        tagurl: The URL of the tag page.
-        maxitems: Maximum number of cards to return.
-
-    Returns:
-        List of dicts with project info.
-    """
-    try:
-        r = requests.get(tag_url, timeout=12)
-        r.raise_for_status()
-    except Exception:
-        return []
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    main = soup.select_one("main") or soup
-
-    # Kandidaten-Links
-    links = main.find_all("a", href=True)
-    items: List[Dict] = []
-    seen = set()
-
-    def abs_url(href: str) -> str:
-        return urllib.parse.urljoin(tag_url, href) if href.startswith("/") else href
-
-    EXCLUDES = (
-        "/tags/", "/uebersicht", "/projektanmeldungen", "/termine", "/jury",
-        "/genki", "/kuratiertes", "/cops", "/vernetzung",
-        "/weiterbildung", "/wb-kompass", "/fobizz",
-    )
-
-    for a in links:
-        href = a.get("href") or ""
-        url = abs_url(href)
-        if not url or url.endswith("#"):
-            continue
-        path = urllib.parse.urlparse(url).path.lower()
-
-        # Nur echte Detailseiten:
-        if "/home/innovationsfonds/projektvorstellungen/" not in path:
-            continue
-        if any(x in path for x in EXCLUDES):
-            continue
-
-        title = (a.get_text(" ", strip=True) or "").strip()
-        if len(title) < 3:
-            continue
-
-        # Kontext: finde eine passende Karte/Container und hole p-Text
-        ctx = a
-        for parent in a.parents:
-            if parent.name in ("article", "li", "div", "section"):
-                ctx = parent
-                break
-
-        desc = ""
-        p = ctx.find("p")
-        if p and p.get_text(strip=True):
-            desc = p.get_text(" ", strip=True)
-        if not desc:
-            sib = ctx.find_next_sibling()
-            if sib:
-                p2 = sib.find("p")
-                if p2 and p2.get_text(strip=True):
-                    desc = p2.get_text(" ", strip=True)
-        if not desc:
-            raw = ctx.get_text(" ", strip=True)
-            desc = re.sub(r"\s+", " ", raw)
-
-        # Dopplung entschärfen & kürzen
-        if desc.lower().startswith(title.lower()):
-            desc = desc[len(title):].lstrip(" :–-").strip()
-        if len(desc) > 260:
-            desc = desc[:257].rstrip() + "…"
-
-        key = (url, title.lower())
-        if key in seen:
-            continue
-        seen.add(key)
-
-        items.append({"title": title, "url": url, "snippet": desc})
-
-
-    # Optional: Detail-Snippets für blasse Karten (max. 5 Requests)
-    patched = 0
-    for it in out:
-        if it.get("snippet") and len(it["snippet"]) >= 60:
-            continue
-        u = it.get("url")
-        if not u:
-            continue
-        detail = _fetch_detail_snippet(u, max_chars=400)
-        if detail:
-            it["snippet"] = detail
-            patched += 1
-        if patched >= 5:
-            break
-    return out
-def deduplicate_by_keys(items: list, keys: list) -> list:
-    """
-    Remove duplicates from items list, based on specified keys.
-    """
-    seen = set()
-    out = []
-    for it in items:
-        composite = tuple(it.get(k) for k in keys)
-        if composite in seen:
-            continue
-        seen.add(composite)
-        out.append(it)
-    return out
-def _fetch_detail_snippet(url: str, max_chars: int = 400) -> str:
-    """Holt einen kurzen Einleitungstext von der Projekt-Detailseite (best effort)."""
-    try:
-        r = requests.get(url, timeout=10)
-        r.raise_for_status()
-    except Exception:
-        return ""
-
-    soup = BeautifulSoup(r.text, "html.parser")
-    main = soup.select_one("main") or soup
-
-    # Heuristik: erster sinnvoller Absatz
-    for selector in ["article p", ".content p", "main p", "p"]:
-        p = main.select_one(selector)
-        if p and p.get_text(strip=True):
-            txt = p.get_text(" ", strip=True)
-            txt = re.sub(r"\s+", " ", txt).strip()
-            if len(txt) > 40:  # sehr kurze Platzhalter vermeiden
-                return (txt[:max_chars].rstrip() + "…") if len(txt) > max_chars else txt
-    return ""
-    
-# ----------------------------------------------------------------------
-# Datum tolerant aus Event holen (unterstützt: date_obj, date, ISO, dd.mm.yyyy)
-# ----------------------------------------------------------------------
-from datetime import date as _date
-from typing import Optional
-
-SUBJECT_SLUGS = {
-    "chemie": "chemie",
-    "physik": "physik",
-    "biologie": "biologie",
-    "mathematik": "mathematik",
-    "informatik": "informatik",
-    "deutsch": "deutsch",
-    "englisch": "englisch",
-    "franzoesisch": "franzoesisch",  # nur diese Schreibweise
-    "italienisch": "italienisch",
-    "spanisch": "spanisch",
-    "geschichte": "geschichte",
-    "geografie": "geografie",
-    "wirtschaft": "wirtschaft",
-    "recht": "recht",
-    "philosophie": "philosophie",
-}
-
-def fetch_live_innovationsfonds(subject: Optional[str] = None) -> Optional[Dict]:
-    base = "https://dlh.zh.ch"
-    if subject:
-        key = subject.lower()
-        slug = SUBJECT_SLUGS.get(key, key)
-        url = f"{base}/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{slug}"
-    else:
-        url = f"{base}/home/innovationsfonds/projektvorstellungen/uebersicht"
-    print(f"LIVE FETCH: Innovationsfonds projects for subject='{subject or 'overview'}' from {url}")
-    try:
-        r = requests.get(url, timeout=12, headers={"User-Agent": "DLH-Chatbot/1.0"})
-        r.raise_for_status()
-    except Exception as e:
-        print("LIVE FETCH ERROR (Innovationsfonds):", e)
-        return None
-    soup = BeautifulSoup(r.text, "html.parser")
-    candidates = soup.select("article a, .card a, .teaser a, li a")
-    projects = []
-    for a in candidates:
-        href = a.get("href")
-        title = a.get_text(strip=True)
-        if not href or not title:
-            continue
-        full = href if href.startswith("http") else base + href
-        if "/innovationsfonds/" in full and "/tags/" not in full and "/uebersicht" not in full:
-            projects.append({"title": title, "url": full})
-        if len(projects) >= 12:
-            break
-    if not projects:
-        print("LIVE FETCH: No project cards detected on the page")
-        return None
-    out = ["<ul>"]
-    for p in projects:
-        out.append(f'<li><a href="{p["url"]}" target="_blank" rel="noopener">{p["title"]}</a></li>')
-    out.append("</ul>")
-    content = "\n".join(out)
-    print(f"LIVE FETCH SUCCESS (Innovationsfonds): Compiled {len(projects)} projects")
-    return {
-        "content": content,
-        "metadata": {
-            "source": url,
-            "title": f"Innovationsfonds Projekte - {subject or 'Uebersicht'} (LIVE)",
-            "fetched_live": True
-        }
-    }
-
-# -----------------------------
-# Intent / search
-# -----------------------------
-def normalize_query(q: str) -> Tuple[str, str]:
-    ql = q.lower()
-    q_norm = ql.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
-    return ql, q_norm
-
-def extract_query_intent(query: str) -> Dict:
-    query_lower, q_norm = normalize_query(query)
-
-    subjects = {
-        "chemie": ["chemie"],
-        "physik": ["physik"],
-        "biologie": ["biologie"],
-        "mathematik": ["mathematik", "mathe"],
-        "informatik": ["informatik", "cs"],
-        "deutsch": ["deutsch"],
-        "englisch": ["englisch", "english"],
-        "franzoesisch": ["franzoesisch"],
-        "italienisch": ["italienisch"],
-        "spanisch": ["spanisch"],
-        "geschichte": ["geschichte"],
-        "geografie": ["geografie", "geographie"],
-        "wirtschaft": ["wirtschaft", "w&r", "wr"],
-        "recht": ["recht"],
-        "philosophie": ["philosophie"],
-    }
-
-    subject_keywords = [key for key, kws in subjects.items() if any(kw in q_norm for kw in kws)]
-    topic_keywords = [w for w in ["impuls", "workshop", "veranstaltung", "termine", "events", "innovationsfonds", "projekt", "projekte"] if w in query_lower]
-
-    is_date_query = any(w in query_lower for w in ["wann", "nächsten", "kommenden", "termine", "wann sind", "welche workshops", "welches sind die nächsten"])
-    is_innovationsfonds_query = ("innovationsfonds" in query_lower) or ("innovations" in query_lower) or ("projekt" in query_lower) or ("projekte" in query_lower)
-
-    return {
-        "query_lower": query_lower,
-        "q_norm": q_norm,
-        "subject_keywords": subject_keywords,
-        "topic_keywords": topic_keywords,
-        "is_date_query": is_date_query,
-        "is_innovationsfonds_query": is_innovationsfonds_query,
-    }
-SUBJECT_SLUGS = {
-    "französisch": "franzoesisch",  # genau diese Schreibweise
-    "franzoesisch": "franzoesisch",
-    "englisch": "englisch",
-    "deutsch": "deutsch",
-    "chemie": "chemie",
-    "mathematik": "mathematik",
-    # ggf. ergänzen …
-}
-
-def normalize_subject(text: str) -> Optional[str]:
-    t = (text or "").strip().lower()
-    return SUBJECT_SLUGS.get(t)
-
-def advanced_search(query: str, max_items: int = None):
-    # ... your current ranking ...
-    topk = max_items or RANK_TOPK
-    return ranked[:topk]
-
-    # Workshops live
-    if intent["is_date_query"] or any(k in query_lower for k in ["impuls", "workshop", "termine", "veranstaltung", "events"]):
-        live_chunk = fetch_live_impuls_workshops()
-        if live_chunk:
-            results.append((220, live_chunk))
-
-    # Innovationsfonds live for any detected subject
-    if intent["subject_keywords"]:
-        for subj in intent["subject_keywords"]:
-            live_proj = fetch_live_innovationsfonds(subject=subj)
-            if live_proj:
-                results.append((300, live_proj))
-
-    # Fallback: cached chunks
-    for ch in CHUNKS[:256]:
-        results.append((120, ch))
-
-    # sort & dedupe
-    results.sort(key=lambda x: x[0], reverse=True)
-    seen = set()
-    filtered: List[Tuple[int, Dict]] = []
-    for score, ch in results:
-        meta = ch.get("metadata", {})
-        key = (meta.get("source", ""), meta.get("title", ""))
-        if key in seen:
-            continue
-        seen.add(key)
-        filtered.append((score, ch))
-    return filtered[:max_items]
-
-# -----------------------------
-# Prompt building
-# -----------------------------
-def _as_dict(hit) -> Dict:
-    """Akzeptiert Treffer als Dict oder (score, dict) und gibt immer ein Dict zurück."""
-    if isinstance(hit, dict):
-        return hit
-    if isinstance(hit, tuple) and len(hit) >= 2 and isinstance(hit[1], dict):
-        return hit[1]
-    # Fallback – lieber leeres Dict als Exception im Produktivbetrieb
-    return {}
-
-def build_system_prompt() -> str:
-    return (
-        "Du bist der offizielle DLH Chatbot. Antworte auf Deutsch mit HTML-Formatierung. "
-        "Wenn der Kontext mehrere Termin- oder Projektzeilen enthält, liste ALLE als eine HTML-Liste "
-        "(<ul><li>…</li></ul>) auf. Nenne bei Terminen Datum und Zeit sowie einen verlinkten Titel. "
-        "Bei Projekten im Innovationsfonds liste die Titel jeweils als klickbare Links. "
-        "Wenn es sich um Termine/Workshops handelt, nutze folgendes HTML-Muster:\n\n"
-        "<section class='dlh-answer'>\n"
-        "  <p>Kurz-Einleitung (1 Satz).</p>\n"
-        "  <ol class='timeline'>\n"
-        "    <li>\n"
-        "      <time>2025-11-11</time>\n"
-        "      <a href='URL' target='_blank'>Titel des Workshops</a>\n"
-        "      <div class='meta'>Ort/Format (falls bekannt)</div>\n"
-        "    </li>\n"
-        "    <!-- weitere <li> ... -->\n"
-        "  </ol>\n"
-        "  <h3>Quellen</h3>\n"
-        "  <ul class='sources'>\n"
-        "    <li><a href='URL' target='_blank'>Titel oder Domain</a></li>\n"
-        "  </ul>\n"
-        "</section>\n\n"
-        "Bei Projektlisten nutze Karten:\n\n"
-        "<section class='dlh-answer'>\n"
-        "  <p>Kurz-Einleitung (1 Satz).</p>\n"
-        "  <div class='cards'>\n"
-        "    <article class='card'>\n"
-        "      <h4><a href='URL' target='_blank'>Projekttitel</a></h4>\n"
-        "      <p>Kurze Beschreibung (1–2 Sätze).</p>\n"
-        "    </article>\n"
-        "    <!-- weitere .card ... -->\n"
-        "  </div>\n"
-        "  <h3>Quellen</h3>\n"
-        "  <ul class='sources'>\n"
-        "    <li><a href='URL' target='_blank'>Titel oder Domain</a></li>\n"
-        "  </ul>\n"
-        "</section>\n"
-    )
-def _truncate(s: str, n: int) -> str:
-    s = s or ""
-    return s if len(s) <= n else (s[: max(0, n - 1)] + "…")    
-def build_user_prompt(question: str, hits: List[Dict]) -> str:
-    """Erzeugt den Prompt für das LLM mit Query, Datum und relevanten Textauszügen."""
-    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    parts = [
-        f"Heutiges Datum: {today}",
-        f"Benutzerfrage: {question}",
-        "",
-        "Relevante Auszüge:"
-    ]
-
-    used = sum(len(p) for p in parts)  # aktueller Verbrauch
-    for h in hits[:MAX_HITS_IN_PROMPT]:
-        title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
-        url   = h.get("url")   or h.get("metadata", {}).get("source") or ""
-        snippet = (
-            h.get("snippet")
-            or h.get("content")
-            or h.get("metadata", {}).get("description")
-            or ""
-        )
-        block = f"- {title} — {url}\n  {_truncate(snippet, MAX_SNIPPET_CHARS)}\n"
-        if used + len(block) > PROMPT_CHARS_BUDGET:
-            break
-        parts.append(block)
-        used += len(block)
-
-
-    parts.append(
-        "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
-        "Verwende Listen (<ul><li>…</li></ul>) oder Karten, wenn sinnvoll. "
-        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a>."
-    )
-
-    return "\n".join(parts)
-# -----------------------------
-# LLM call
-# -----------------------------
-def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) -> str:
-    resp = openai_client.chat.completions.create(
-        model=OPENAI_MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_prompt},
-        ],
-        max_completion_tokens=max_tokens,   # ✅ richtig
-        # KEIN temperature / top_p / frequency_penalty ...
-    )
-    return resp.choices[0].message.content.strip()
-# -----------------------------
-# Sources builder
-# -----------------------------
-def build_sources(ranked, limit: int | None = None):
-    lim = limit or MAX_SOURCES
-    out = []
-    seen = set()
-    for h in ranked:
-        url = h.get("metadata", {}).get("source") or h.get("url")
-        if not url or url in seen:
-            continue
-        seen.add(url)
-        out.append(SourceItem(
-            title=h.get("metadata", {}).get("title") or h.get("title"),
-            url=url,
-            snippet=h.get("metadata", {}).get("snippet") or h.get("snippet")
-        ))
-        if len(out) >= lim:
-            break
-    return out
-    
-import html, re  # oben schon vorhanden? Wenn nicht, hier lassen.
-
-def ensure_clickable_links(html_text: str) -> str:
-    """
-    Wandelt nackte URLs im Text in anklickbare Links um:
-    https://beispiel -> <a href='...' target='_blank'>...</a>
-    """
-    url_re = re.compile(r'(https?://[^\s<>"\)]+)')
-    def repl(m):
-        u = m.group(1)
-        return f"<a href='{html.escape(u)}' target='_blank'>{html.escape(u)}</a>"
-    return url_re.sub(repl, html_text)
-
-import inspect
-
-REQUIRED_SYS_HINTS = [
-    "valide", "HTML", "Quellen", "<a href", "Liste", "Timeline"  # locker gehalten
-]
-
-def _sample_hits():
-    # Minimale, realistische Testdaten für den Prompt
-    return [
-        {
-            "title": "Impulsworkshops – Übersicht",
-            "url": "https://dlh.zh.ch/home/impuls-workshops",
-            "snippet": "Aktuelle und kommende Impuls-Workshops mit Datum und Anmeldung."
-        },
-        {
-            "title": "Innovationsfonds – Chemie",
-            "url": "https://dlh.zh.ch/home/innovationsfonds/chemie",
-            "snippet": "Sechs Projekte im Fach Chemie mit Kurzbeschreibung."
-        }
-    ]
-
-def validate_prompts() -> dict:
-    """Prüft System-/User-Prompt, Link-Formatter und call_openai-Signatur."""
-    results = {"ok": True, "checks": []}
-
-    # 1) build_system_prompt vorhanden & enthält die erwarteten Stichworte
-    try:
-        sp = build_system_prompt()
-        ok = isinstance(sp, str) and len(sp) > 20 and all(h.lower() in sp.lower() for h in REQUIRED_SYS_HINTS)
-        results["checks"].append({"name": "build_system_prompt", "ok": ok, "len": len(sp)})
-        if not ok:
-            results["ok"] = False
-    except Exception as e:
-        results["checks"].append({"name": "build_system_prompt", "ok": False, "error": repr(e)})
-        results["ok"] = False
-
-    # 2) build_user_prompt erzeugt sinnvollen Text mit Frage+Treffern
-    try:
-        up = build_user_prompt("Welche Impuls-Workshops stehen als Nächstes an?", _sample_hits())
-        ok = isinstance(up, str) and "Benutzerfrage" in up and "Relevante Auszüge" in up and "http" in up
-        results["checks"].append({"name": "build_user_prompt", "ok": ok, "len": len(up)})
-        if not ok:
-            results["ok"] = False
-    except Exception as e:
-        results["checks"].append({"name": "build_user_prompt", "ok": False, "error": repr(e)})
-        results["ok"] = False
-
-    # 3) ensure_clickable_links macht aus URL einen <a>-Link
-    try:
-        test_html = "Siehe https://dlh.zh.ch/home/impuls-workshops für Details."
-        html_out = ensure_clickable_links(test_html)
-        ok = "<a href=" in html_out and "target='_blank'" in html_out
-        results["checks"].append({"name": "ensure_clickable_links", "ok": ok})
-        if not ok:
-            results["ok"] = False
-    except Exception as e:
-        results["checks"].append({"name": "ensure_clickable_links", "ok": False, "error": repr(e)})
-        results["ok"] = False
-
-    # 4) call_openai Signatur: (system_prompt, user_prompt, max_tokens=...)
-    try:
-        sig = inspect.signature(call_openai)
-        params = list(sig.parameters.keys())
-        ok = params[:2] == ["system_prompt", "user_prompt"] and "max_tokens" in params
-        results["checks"].append({"name": "call_openai_signature", "ok": ok, "params": params})
-        if not ok:
-            results["ok"] = False
-    except Exception as e:
-        results["checks"].append({"name": "call_openai_signature", "ok": False, "error": repr(e)})
-        results["ok"] = False
-
-    return results
-# -----------------------------
-# Endpoints
-# -----------------------------
-@app.get("/debug/deps")
-def debug_deps():
-    import platform
-    import openai as _openai_pkg
-    import bs4 as _bs4_pkg
-    import lxml as _lxml_pkg
-    return {
-        "python": platform.python_version(),
-        "openai": getattr(_openai_pkg, "__version__", "?"),
-        "bs4": getattr(_bs4_pkg, "__version__", "?"),
-        "lxml": getattr(_lxml_pkg, "__version__", "?"),
-    }
-
-@app.get("/health")
-def health():
-    return {"status": "healthy", "chunks_loaded": len(CHUNKS), "model": OPENAI_MODEL}
-
-@app.get("/version")
-def version():
-    return {"version": "openai-backend", "model": OPENAI_MODEL}
-    
-@app.get("/")
-def root():
-    return {
-        "ok": True,
-        "service": "DLH OpenAI API",
-        "endpoints": ["/health", "/ask", "/version"]    
-    }
-    
-IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops"
-
 def fetch_live_impuls_workshops() -> List[Dict]:
-    """Parst die Impuls-Workshop-Seite und gibt Events als
-    [{'date': date, 'title': str, 'url': str}] zurück."""
+    """
+    Fetches normalized live Impuls-Workshop events.
+    Returns list of dicts with 'date', 'title', 'url', 'when', '_d' (date only) keys.
+    """
+    IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops"
+    UA = {"User-Agent": "DLH-Chatbot/1.0 (+https://dlh.zh.ch)"}
+
     try:
-        r = requests.get(IMPULS_URL, timeout=20, headers={"User-Agent": "DLH-Bot/1.1"})
+        r = requests.get(IMPULS_URL, timeout=20, headers=UA, allow_redirects=True)
         r.raise_for_status()
         html = r.text
-        soup = BeautifulSoup(html, "lxml")  # lxml ist installiert
-
-        # Boilerplate raus
-        for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner"]:
-            for el in soup.select(sel):
-                el.decompose()
-
-        root = soup.select_one("main") or soup
-        events: List[Dict] = []
-
-        # 1) Bevorzugt <time datetime="YYYY-MM-DD"> nutzen
-        for li in root.select("ol li, ul li"):
-            a = li.find("a")
-            t_el = li.find("time")
-            href = ""
-            if a and a.has_attr("href"):
-                href = a["href"]
-                if href.startswith("/"):
-                    href = urllib.parse.urljoin(IMPULS_URL, href)
-
-            # Datum aus datetime-Attribut
-            dt_date = None
-            if t_el and t_el.has_attr("datetime"):
-                iso = _norm_spaces(t_el["datetime"])
-                m = re.match(r"^\s*(\d{4}-\d{2}-\d{2})", iso)
-                if m:
-                    try:
-                        y, mth, d = map(int, m.group(1).split("-"))
-                        dt_date = datetime(y, mth, d, tzinfo=timezone.utc).date()
-                    except Exception:
-                        dt_date = None
-
-            # Fallback: Datum aus sichtbarem Text
-            if not dt_date:
-                date_str = _norm_spaces(t_el.get_text(" ", strip=True) if t_el else li.get_text(" ", strip=True))
-                date_str = date_str.split(" - ")[0].split(" – ")[0]
-                dt = parse_de_date(date_str)
-                dt_date = dt.date() if dt else None
-
-            title = _norm_spaces(a.get_text(" ", strip=True) if a else li.get_text(" ", strip=True))
-            if dt_date and title:
-                events.append({"date": dt_date, "title": title, "url": href or IMPULS_URL})
-
-        # 2) Fallback: in Sektionen nach Überschriften mit „Impuls“ suchen
-        if not events:
-            heads = [h for h in root.select("h2, h3") if "impuls" in h.get_text(" ", strip=True).lower()]
-            for h in heads:
-                sec = h.find_next(["ol", "ul", "section", "div"]) or root
-                for li in sec.select("li"):
-                    a = li.find("a")
-                    href = ""
-                    if a and a.has_attr("href"):
-                        href = a["href"]
-                        if href.startswith("/"):
-                            href = urllib.parse.urljoin(IMPULS_URL, href)
-
-                    txt = _norm_spaces(li.get_text(" ", strip=True))
-                    date_part = txt.split(" - ")[0].split(" – ")[0]
-                    dt = parse_de_date(date_part)
-                    if not dt:
-                        continue
-                    title = _norm_spaces(a.get_text(" ", strip=True) if a else txt)
-                    events.append({"date": dt.date(), "title": title, "url": href or IMPULS_URL})
-
-        # Deduplizieren
-        seen = set()
-        cleaned: List[Dict] = []
-        for ev in events:
-            key = (ev["date"].isoformat(), ev["title"])
-            if key in seen:
-                continue
-            seen.add(key)
-            cleaned.append(ev)
-
-        # Debug-Info, falls leer
-        if not cleaned:
-            sample_texts = []
-            for li in (root.select("ol li, ul li")[:3] or []):
-                sample_texts.append(_norm_spaces(li.get_text(" ", strip=True)))
-            print("LIVE FETCH DEBUG (Impuls): sample items:", sample_texts)
-
-        print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events)})")
-        return cleaned
-
-    except Exception as e:
-        print("LIVE FETCH ERROR (Impuls):", repr(e))
+    except requests.RequestException as ex:
+        logger.error("LIVE FETCH ERROR (Impuls, GET): %s", repr(ex))
         return []
-        
-    # BeautifulSoup mit Fallback (falls lxml doch fehlt)
+
     try:
+        # Try faster parser first
         soup = BeautifulSoup(html, "lxml")
     except Exception:
+        # Fallback parser if lxml not available
         soup = BeautifulSoup(html, "html.parser")
 
-    # Offensichtliche Boilerplate entfernen
-    for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner", "header", "footer", "nav", "aside"]:
-        for el in soup.select(sel):
+    # Remove boilerplate elements
+    for selector in [
+        "script", "style", "noscript", ".cookie", ".consent", ".banner",
+        "header", "footer", "nav", "aside"
+    ]:
+        for el in soup.select(selector):
             el.decompose()
 
     root = soup.select_one("main") or soup
-
     events_raw: List[Dict] = []
 
-    # ----------------------------
-    # A) Generischer Listen-Parser
-    #    (ol/ul > li, bevorzugt mit <time>, sonst Text)
-    # ----------------------------
+    # Parse lists: ol/ul > li, preferably with <a>, else plain text
     for li in root.select("ol li, ul li"):
         txt = li.get_text(" ", strip=True)
         if not txt:
             continue
-
         a = li.find("a")
         title = a.get_text(" ", strip=True) if a else txt
         href = a.get("href") if (a and a.has_attr("href")) else ""
         if href and href.startswith("/"):
             href = urllib.parse.urljoin(IMPULS_URL, href)
-
-        # Datumskandidat: <time> … oder fallback auf den gesamten LI-Text
         time_el = li.find("time")
         when = time_el.get_text(" ", strip=True) if time_el else txt
-
         events_raw.append({"title": title, "url": href or IMPULS_URL, "when": when})
 
-    # ----------------------------
-    # B) Fallback: Blöcke unter H2/H3 mit "Impuls"
-    # ----------------------------
+    # Fallback: look under headings with "Impuls"
     if not events_raw:
         heads = [h for h in root.select("h2, h3") if "impuls" in h.get_text(" ", strip=True).lower()]
         for h in heads:
@@ -1022,25 +280,23 @@ def fetch_live_impuls_workshops() -> List[Dict]:
                 when = time_el.get_text(" ", strip=True) if time_el else txt
                 events_raw.append({"title": title, "url": href or IMPULS_URL, "when": when})
 
-    # ----------------------------
-    # Normalisieren + Datum parsen
-    # ----------------------------
+    # Normalize and parse dates
     norm: List[Dict] = []
     for e in events_raw:
         dt = parse_de_date_to_date(e.get("when") or "") or parse_de_date_to_date(e.get("title") or "")
         if not dt:
-            # als allerletzte Chance: versuche nochmal auf dem gesamten Text
+            # fallback: try combined text
             all_txt = f"{e.get('title','')} {e.get('when','')}"
             dt = parse_de_date_to_date(all_txt)
         if not dt:
-            # Event ohne erkennbares Datum überspringen
-            continue
+            continue  # skip events without date
+
         item = dict(e)
-        item["date"] = dt
-        item["_d"] = dt.date()
+        item["date"] = dt  # datetime.date
+        item["_d"] = dt
         norm.append(item)
 
-    # Deduplizieren (Titel + Datum)
+    # Deduplicate by date + title
     seen = set()
     cleaned: List[Dict] = []
     for e in norm:
@@ -1050,140 +306,181 @@ def fetch_live_impuls_workshops() -> List[Dict]:
         seen.add(key)
         cleaned.append(e)
 
-    # Sortieren (aufsteigend nach Datum)
     cleaned.sort(key=lambda x: x["_d"])
-
-    print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events_raw)})")
+    logger.info(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events_raw)})")
     return cleaned
-        
-from datetime import datetime, timezone
-import re
-
-def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
-    if not events:
-        return (
-            "<section class='dlh-answer'>"
-            "<p>Keine Workshops gefunden.</p>"
-            "<h3>Quellen</h3>"
-            "<ul class='sources'>"
-            "<li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
-            "</ul></section>"
-        )
-
-    lis = []
-    for e in events:
-        d = e.get("date")
-        if isinstance(d, datetime):
-            d = d.date()
-        date_str = d.strftime("%d.%m.%Y") if d else ""
-        t = e.get("title", "Ohne Titel")
-        url = e.get("url", "")
-        place = e.get("place") or ""
-        meta = f"<div class='meta'>{place}</div>" if place else ""
-        lis.append(f"<li><time>{date_str}</time> <a href='{url}' target='_blank'>{t}</a>{meta}</li>")
-
-    return (
-        "<section class='dlh-answer'>"
-        f"<p>{title}:</p>"
-        "<ol class='timeline'>"
-        + "".join(lis) +
-        "</ol>"
-        "<h3>Quellen</h3>"
-        "<ul class='sources'>"
-        "<li><a href='https://dlh.zh.ch/home/impuls-workshops' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
-        "</ul></section>"
-    )
-    cards = []
-    for it in items:
-        title = it.get("title", "(ohne Titel)")
-        url = it.get("url", "#")
-        snip = (it.get("snippet") or "").strip()
-        cards.append(
-            "<article class='card'>"
-            f"  <h4><a href='{url}' target='_blank'>{title}</a></h4>"
-            f"  <p>{snip}</p>"
-            "</article>"
-        )
-
-    html = (
-        "<section class='dlh-answer'>"
-        f"  <p>Innovationsfonds-Projekte im Fach <strong>{subject_title}</strong>:</p>"
-        f"  <div class='cards'>{''.join(cards)}</div>"
-        "  <h3>Quellen</h3>"
-        "  <ul class='sources'>"
-        f"    <li><a href='{tag_url}' target='_blank'>Tag-Seite: {subject_title}</a></li>"
-        "  </ul>"
-        "</section>"
-    )
-    return html
-
-def _event_to_date(e: Dict) -> Optional[datetime]:
-    """Nimmt ein Event-Dict {'title','when','date',...} und liefert datetime oder None."""
-    if not isinstance(e, dict):
-        return None
-    # Wenn schon ein datetime drin ist:
-    d = e.get("date")
-    if isinstance(d, datetime):
-        return d
-    # Quelle bevorzugt: 'when', sonst 'title'
-    txt = e.get("when") or e.get("title") or ""
-    dt = parse_de_date_to_date(txt)
-    return dt  
-
-@app.get("/debug/impuls")
-def debug_impuls():
-    ev = fetch_live_impuls_workshops()
-    return {"count": len(ev), "sample": ev[:3]}
     
-def render_workshops_html(items: List[Dict]) -> str:
-    """Erzeugt eine kompakte HTML-Timeline mit klickbaren Titeln."""
-    # Weiterleitung auf die neue Timeline-Version
-    return render_workshops_timeline_html(items)
+# Part 4 of ultimate_api-Kopie.py
 
+from typing import Union
 
-def normalize_subject_to_slug(text: str) -> Optional[str]:
-    """
-    Verwendet die globale SUBJECT_SLUGS-Tabelle, um ein Fach
-    aus der Benutzerfrage dem passenden Tag-Slug zuzuordnen.
-    """
-    if not text:
+def fetch_live_innovationsfonds(subject: Optional[str] = None) -> Optional[Dict]:
+    base = "https://dlh.zh.ch"
+    if subject:
+        key = subject.lower()
+        slug = SUBJECT_SLUGS.get(key, key)
+        url = f"{base}/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{slug}"
+    else:
+        url = f"{base}/home/innovationsfonds/projektvorstellungen/uebersicht"
+
+    logger.info(f"LIVE FETCH Innovationsfonds projects for subject='{subject or 'overview'}' from {url}")
+    try:
+        r = requests.get(url, timeout=12, headers={"User-Agent": "DLH-Chatbot/1.0"})
+        r.raise_for_status()
+    except requests.RequestException as e:
+        logger.error(f"LIVE FETCH ERROR Innovationsfonds: {e}")
         return None
-    t = text.lower()
-    for key, slug in SUBJECT_SLUGS.items():
-        if key in t:
-            return slug
-    return None
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    candidates = soup.select("article a, .card a, .teaser a, li a")
+    projects: List[Dict] = []
+
+    for a in candidates:
+        href = a.get("href")
+        title = a.get_text(strip=True)
+        if not href or not title:
+            continue
+        full = href if href.startswith("http") else base + href
+        if "/innovationsfonds/" in full and "/tags/" not in full and "/uebersicht" not in full:
+            projects.append({"title": title, "url": full})
+
+        if len(projects) >= 12:
+            break
+
+    if not projects:
+        logger.info("LIVE FETCH: No project cards detected on the page")
+        return None
+
+    content_lines = [""]
+    for p in projects:
+        content_lines.append(f'{p["title"]}')
+        content_lines.append("")
+    content = "\n".join(content_lines)
+
+    logger.info(f"LIVE FETCH SUCCESS Innovationsfonds: Compiled {len(projects)} projects")
+    return {
+        "content": content,
+        "metadata": {
+            "source": url,
+            "title": f"Innovationsfonds Projekte - {subject or 'Uebersicht'} (LIVE)",
+            "fetched_live": True
+        },
+    }
+
+# Utility to safely extract dict from either dict or (score, dict) tuple
+def _as_dict(hit: Union[Dict, Tuple[int, Dict]]) -> Dict:
+    if isinstance(hit, dict):
+        return hit
+    if isinstance(hit, tuple) and len(hit) > 1 and isinstance(hit[1], dict):
+        return hit[1]
+    return {}
+
+def build_system_prompt() -> str:
+    return (
+        "Du bist der offizielle DLH Chatbot. Antworte auf Deutsch mit HTML-Formatierung. "
+        "Wenn der Kontext mehrere Termin- oder Projektzeilen enthält, liste ALLE als eine HTML-Liste "
+        "(…) auf. Nenne bei Terminen Datum und Zeit sowie einen verlinkten Titel. "
+        "Bei Projekten im Innovationsfonds liste die Titel jeweils als klickbare Links. "
+        "Wenn es sich um Termine/Workshops handelt, nutze folgendes HTML-Muster:\n\n"
+        "Kurz-Einleitung (1 Satz).\n"
+        "<ol class='timeline'>\n"
+        "<li><time>2025-11-11</time> <a href='URL' target='_blank'>Titel des Workshops</a>"
+        "<div class='meta'>Ort/Format (falls bekannt)</div></li>\n"
+        "</ol>\n"
+        "<h3>Quellen</h3>\n"
+        "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
+        "\n"
+        "Bei Projektlisten nutze Karten:\n\n"
+        "<div class='cards'>\n"
+        "<article class='card'>\n"
+        "<h4><a href='URL' target='_blank'>Projekttitel</a></h4>\n"
+        "<p>Kurze Beschreibung (1–2 Sätze).</p>\n"
+        "</article>\n"
+        "</div>\n"
+        "<h3>Quellen</h3>\n"
+        "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
+    )
+
+def _truncate(s: str, n: int) -> str:
+    s = s or ""
+    return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
+
+def build_user_prompt(question: str, hits: List[Dict]) -> str:
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    parts = [
+        f"Heutiges Datum: {today}",
+        f"Benutzerfrage: {question}",
+        "",
+        "Relevante Auszüge:",
+    ]
+
+    used = sum(len(p) for p in parts)  # current usage
+
+    for h in hits[:MAX_HITS_IN_PROMPT]:
+        title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
+        url = h.get("url") or h.get("metadata", {}).get("source") or ""
+        snippet = (
+            h.get("snippet")
+            or h.get("content")
+            or h.get("metadata", {}).get("description")
+            or ""
+        )
+        block = f"- {title} — {url}\n {_truncate(snippet, MAX_SNIPPET_CHARS)}\n"
+        if used + len(block) > PROMPT_CHARS_BUDGET:
+            break
+        parts.append(block)
+        used += len(block)
+
+    parts.append(
+        "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
+        "Verwende Listen (…) oder Karten, wenn sinnvoll. "
+        "Verlinke Quellen mit Titel."
+    )
+
+    return "\n".join(parts)
+
+# Part 5 of ultimate_api-Kopie.py
+
+import html
+import inspect
+
+REQUIRED_SYS_HINTS = ["valide", "HTML", "Quellen"]
+
+def ensure_clickable_links(html_text: str) -> str:
+    """
+    Wandelt nackte URLs im Text in anklickbare Links um.
+    """
+    url_re = re.compile(r'(https?://[^\s<>"\)]+)')
+    def repl(m):
+        u = m.group(1)
+        return f'<a href="{html.escape(u)}" target="_blank">{html.escape(u)}</a>'
+    return url_re.sub(repl, html_text)
 
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
         ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
-        print("Y  ranked types:", [type(x).__name__ for x in ranked[:5]])
+        logger.debug(f"Y ranked types: {[type(x).__name__ for x in ranked[:5]]}")
 
-        # Früher Exit für Workshop-Fragen: live scrapen & direkt rendern
         q_low = (req.question or "").lower()
+
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            # ---------- Workshops (Impuls) – Intent & Filter ----------
+            # Handle workshop early exit with live scraping and direct rendering
             def _norm(s: str) -> str:
                 s = (s or "").lower()
-                return (s.replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss"))
-
+                return s.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
             qn = _norm(req.question)
+            live = fetch_live_impuls_workshops()
+            if not live:
+                live = fallback_events_from_chunks()
 
-        # ...
-        live = fetch_live_impuls_workshops()
-        if not live:
-            live = fallback_events_from_chunks()
-        # danach deine bestehende Filter/Sortier-Logik (want_next / want_past / default)
-        
             want_past = any(k in qn for k in [
-                "gab es","waren","vergangenen","bisherigen","im jahr","letzten","fruehere","frühere","bisher"
+                "gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"
             ])
             want_next = any(k in qn for k in [
-                "naechste","nächste","der naechste","der nächste","als naechstes","als nächstes",
-                "nur der naechste","nur der nächste","naechstes","nächstes"
+                "naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes",
+                "nur der naechste", "nur der nächste", "naechstes", "nächstes"
             ])
-
             yr = None
             m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
             if m:
@@ -1192,483 +489,80 @@ def ask(req: QuestionRequest):
                 except Exception:
                     yr = None
 
-            raw = fetch_live_impuls_workshops() or []
-            # → robuste Normalisierung inkl. _d = date()
             norm = []
-            for e in raw:
+            for e in live or []:
                 d = _event_to_date(e)
                 if d:
                     ee = dict(e)
                     ee["_d"] = d
                     norm.append(ee)
 
-            events = fetch_live_impuls_workshops()
             today = datetime.now(timezone.utc).date()
-            future = [e for e in events if e.get("_d") and e["_d"] >= today]
-            past   = [e for e in events if e.get("_d") and e["_d"] <  today]
-            # Branching
+            future = [e for e in norm if e.get("_d") and e["_d"] >= today]
+            past = [e for e in norm if e.get("_d") and e["_d"] < today]
+
             if want_next:
                 events_to_show = sorted(future, key=lambda x: x["_d"])[:1]
-                html = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
+                html_str = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
                 return AnswerResponse(
-                    answer=html,
+                    answer=html_str,
                     sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
                 )
-
             if want_past:
                 if yr:
                     past = [e for e in past if e["_d"].year == yr]
                 events_to_show = sorted(past, key=lambda x: x["_d"], reverse=True)
-                html = render_workshops_timeline_html(events_to_show, title=f"Vergangene Impuls-Workshops{(' '+str(yr)) if yr else ''}")
+                html_str = render_workshops_timeline_html(events_to_show, title=f"Vergangene Impuls-Workshops{(' ' + str(yr)) if yr else ''}")
                 return AnswerResponse(
-                    answer=html,
+                    answer=html_str,
                     sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
                 )
-
-            # Default: alle ab heute
+            # Default: all future workshops
             events_to_show = sorted(future, key=lambda x: x["_d"])
-            html = render_workshops_timeline_html(events_to_show, title="Kommende Impuls-Workshops")
+            html_str = render_workshops_timeline_html(events_to_show, title="Kommende Impuls-Workshops")
             return AnswerResponse(
-                answer=html,
+                answer=html_str,
                 sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
             )
-            # Default: alle ab heute
-            future_sorted = sorted(future, key=lambda x: x["date"])
-            html = render_workshops_timeline_html(
-                future_sorted,
-                title="Kommende Impuls-Workshops",
-            )
-            return AnswerResponse(
-                answer=html,
-                sources=[SourceItem(
-                    title="Impuls-Workshop-Übersicht",
-                    url=IMPULS_URL,
-                )],
-            )
-            # Default: alle ab heute
-            future_sorted = sorted(future, key=lambda x: x["date"])
-            html = render_workshops_timeline_html(
-                future_sorted,
-                title="Kommende Impuls-Workshops",
-            )
-            return AnswerResponse(
-                answer=html,
-                sources=[
-                    SourceItem(
-                        title="Impuls-Workshop-Übersicht",
-                        url="https://dlh.zh.ch/home/impuls-workshops",
-                    )
-                ],
-            )
 
-
-        # Früher Exit für Innovationsfonds-Projekte nach Fach (Cards) – alternative Schreibweise
-        if (
-            "innovationsfonds" in q_low
-            or "innovations-projekt" in q_low
-            or "innovationsprojekte" in q_low
-            or "projektvorstellungen" in q_low
-            or "projekte" in q_low
-            or "innovationsfond projekte" in q_low
-            or "innovationsfonds projekte" in q_low
-        ):
+        if any(k in q_low for k in [
+            "innovationsfonds", "innovations-projekt", "innovationsprojekte",
+            "projektvorstellungen", "projekte", "innovationsfond projekte", "innovationsfonds projekte"
+        ]):
             tag_slug = normalize_subject_to_slug(req.question)
             if tag_slug:
                 tag_url = sitemap_find_innovations_tag(tag_slug)
                 if tag_url:
                     cards = fetch_live_innovationsfonds_cards(tag_url)
                     if cards:
-                        html = render_innovationsfonds_cards_html(
-                            cards,
-                            subject_title=tag_slug.capitalize(),
-                            tag_url=tag_url,
-                        )
-                        srcs = [
-                            SourceItem(
-                                title=f"Innovationsfonds – {tag_slug}",
-                                url=tag_url,
-                                snippet=f"Projekte mit Tag {tag_slug}",
-                            )
-                        ]
-                        # optional: die erste Projekt-Detailseite als weitere Quelle
+                        html_str = render_innovationsfonds_cards_html(cards, subject_title=tag_slug.capitalize(), tag_url=tag_url)
+                        srcs = [SourceItem(title=f"Innovationsfonds – {tag_slug}", url=tag_url, snippet=f"Projekte mit Tag {tag_slug}")]
                         if cards and cards[0].get("url"):
-                            srcs.append(
-                                SourceItem(
-                                    title=cards[0]["title"],
-                                    url=cards[0]["url"],
-                                    snippet=cards[0].get("snippet", ""),
-                                )
-                            )
-                        return AnswerResponse(answer=html, sources=srcs)
-
-
-
-        # LLM-Weg (wenn kein Workshop-/IF-Frühexit gegriffen hat)
+                            srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet", "")))
+                        return AnswerResponse(answer=html_str, sources=srcs)
+        # Default LLM path
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(req.question, ranked)
-
-        print("Y  LLM call →", OPENAI_MODEL, "| prompt_len:", len(user_prompt))
+        logger.debug(f"Y LLM call → {settings.openai_model} | prompt_len: {len(user_prompt)}")
         answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
         answer_html = ensure_clickable_links(answer_html)
-
         sources = build_sources(ranked, limit=req.max_sources or 4)
         return AnswerResponse(answer=answer_html, sources=sources)
-
     except Exception as e:
-        print("ERROR /ask:", repr(e))
-        print(format_exc())
-        msg = (
-            "<strong>Entschuldigung, es gab einen technischen Fehler.</strong><br>"
-            "Bitte versuchen Sie es später erneut."
-        )
+        logger.error("ERROR /ask: %s\n%s", repr(e), format_exc())
+        msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
         return AnswerResponse(answer=msg, sources=[])
-
 
 @app.get("/debug/validate")
 def debug_validate():
-    """Läuft ohne OpenAI-Call. Gut für schnelle Deploy-Checks."""
+    """Runs prompt validation without calling OpenAI."""
     res = validate_prompts()
     return res
 
-# -----------------------------
-# Local dev
-# -----------------------------
-
-
-# === Functions carried over from old live_patch2_fix (needed) ===
-
-
-def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> str:
-    """Erstelle Prompt - Formatierung ist im System Prompt"""
-    
-    current_date = datetime.now()
-    current_date_str = current_date.strftime('%d.%m.%Y')
-    
-    # Event-Sortierung von gestern!
-    if intent['is_date_query'] or any(keyword in ['workshop', 'veranstaltung'] for keyword in intent['topic_keywords']):
-        sorted_events = sort_events_chronologically(chunks, current_date)
-        
-        context_parts = []
-        
-        if sorted_events['future_events']:
-            context_parts.append("=== KOMMENDE VERANSTALTUNGEN (chronologisch sortiert) ===")
-            for event in sorted_events['future_events']:
-                days_until = (event['date'].date() - current_date.date()).days
-                context_parts.append(f"\nY... DATUM: {event['date'].strftime('%d.%m.%Y (%A)')} (in {days_until} Tagen)")
-                context_parts.append(f"Titel: {event['chunk']['metadata'].get('title', 'Unbekannt')}")
-                context_parts.append(f"Quelle: {event['chunk']['metadata'].get('source', 'Unbekannt')}")
-                context_parts.append(event['chunk']['content'][:400])
-                context_parts.append("---")
-        
-        if sorted_events['past_events']:
-            context_parts.append("\n\n=== VERGANGENE VERANSTALTUNGEN ===")
-            for event in sorted_events['past_events'][:5]:
-                days_ago = (current_date.date() - event['date'].date()).days
-                context_parts.append(f"\nY... DATUM: {event['date'].strftime('%d.%m.%Y (%A)')} (vor {days_ago} Tagen - BEREITS VORBEI)")
-                context_parts.append(f"Titel: {event['chunk']['metadata'].get('title', 'Unbekannt')}")
-                context_parts.append(f"Quelle: {event['chunk']['metadata'].get('source', 'Unbekannt')}")
-                context_parts.append(event['chunk']['content'][:400])
-                context_parts.append("---")
-        
-        if sorted_events['no_date_events']:
-            context_parts.append("\n\n=== WEITERE INFORMATIONEN ===")
-            for item in sorted_events['no_date_events']:
-                context_parts.append(f"\nTitel: {item['chunk']['metadata'].get('title', 'Unbekannt')}")
-                context_parts.append(f"Quelle: {item['chunk']['metadata'].get('source', 'Unbekannt')}")
-                context_parts.append(item['chunk']['content'][:400])
-                context_parts.append("---")
-        
-        context = "\n".join(context_parts)
-        
-        prompt = f"""
-Heutiges Datum: {current_date_str}
-Bitte beantworte die folgende Frage mit Bezug auf die gegebenen Daten.
-{question}
-"""
-
-        return prompt
-def extract_dates_from_text(text: str) -> List[Tuple[datetime, str]]:
-    """Extrahiere Daten aus Text - unterstA14tzt auch abgekA14rzte Monatsnamen"""
-    dates_found = []
-    
-    month_map_full = {
-        'januar': 1, 'februar': 2, 'maerz': 3, 'april': 4,
-        'mai': 5, 'juni': 6, 'juli': 7, 'august': 8,
-        'september': 9, 'oktober': 10, 'november': 11, 'dezember': 12
-    }
-    
-    month_map_abbr = {
-        'jan': 1, 'feb': 2, 'mAr': 3, 'maerz': 3, 'mrz': 3, 'apr': 4,
-        'mai': 5, 'jun': 6, 'jul': 7, 'aug': 8,
-        'sep': 9, 'sept': 9, 'okt': 10, 'nov': 11, 'dez': 12
-    }
-    
-    patterns = [
-        (r'(\d{1,2})\.(\d{1,2})\.(\d{2,4})', 'numeric'),
-        (r'(\d{1,2})\.\s*(Januar|Februar|Maerz|April|Mai|Juni|Juli|August|September|Oktober|November|Dezember)\s*(\d{4})', 'full_month'),
-        (r'(\d{1,2})\.?\s+(Jan\.?|Feb\.?|MAr\.?|Maerz\.?|Mrz\.?|Apr\.?|Mai\.?|Jun\.?|Jul\.?|Aug\.?|Sep\.?|Sept\.?|Okt\.?|Nov\.?|Dez\.?)\s+(\d{4})', 'abbr_month'),
-    ]
-    
-    # Pattern 1: DD.MM.YYYY
-    for match in re.finditer(patterns[0][0], text):
-        try:
-            day = int(match.group(1))
-            month = int(match.group(2))
-            year_str = match.group(3)
-            year = int(year_str) if len(year_str) == 4 else (2000 + int(year_str))
-            
-            date_obj = datetime(year, month, day)
-            start = max(0, match.start() - 100)
-            end = min(len(text), match.end() + 100)
-            context = text[start:end].strip()
-            
-            dates_found.append((date_obj, context, match.group(0)))
-        except ValueError:
-            continue
-    
-    # Pattern 2: DD. Monat YYYY
-    for match in re.finditer(patterns[1][0], text, re.IGNORECASE):
-        try:
-            day = int(match.group(1))
-            month_name = match.group(2).lower()
-            month = month_map_full.get(month_name)
-            year = int(match.group(3))
-            
-            if month:
-                date_obj = datetime(year, month, day)
-                start = max(0, match.start() - 100)
-                end = min(len(text), match.end() + 100)
-                context = text[start:end].strip()
-                
-                dates_found.append((date_obj, context, match.group(0)))
-        except ValueError:
-            continue
-    
-    # Pattern 3: DD Mon. YYYY (abbreviated)
-    for match in re.finditer(patterns[2][0], text, re.IGNORECASE):
-        try:
-            day = int(match.group(1))
-            month_abbr = match.group(2).lower().replace('.', '').strip()
-            month = month_map_abbr.get(month_abbr)
-            year = int(match.group(3))
-            
-            if month:
-                date_obj = datetime(year, month, day)
-                start = max(0, match.start() - 100)
-                end = min(len(text), match.end() + 100)
-                context = text[start:end].strip()
-                
-                dates_found.append((date_obj, context, match.group(0)))
-        except ValueError:
-            continue
-    
-    return dates_found
-
-def load_and_preprocess_data():
-    """Lade und bereite Daten mit verbesserter Struktur vor"""
-    try:
-        file_path = 'processed/processed_chunks.json'
-        
-        print(f"Y Attempting to load data from: {file_path}")
-        
-        with open(file_path, 'r', encoding='utf-8') as f:
-            chunks = json.load(f)
-        
-        print(f" Successfully loaded {len(chunks)} chunks from {file_path}")
-        
-        # Erstelle Index fuer schnellere Suche
-        keyword_index = {}
-        url_index = {}
-        subject_index = {}
-        
-        for i, chunk in enumerate(chunks):
-            # URL-basierter Index
-            url = chunk['metadata'].get('source', '').lower()
-            if url not in url_index:
-                url_index[url] = []
-            url_index[url].append(i)
-            
-            # FAcher-Index aus Metadaten
-            faecher = chunk['metadata'].get('faecher', [])
-            if faecher:
-                for fach in faecher:
-                    fach_lower = fach.lower()
-                    if fach_lower not in subject_index:
-                        subject_index[fach_lower] = []
-                    subject_index[fach_lower].append(i)
-            
-            # Keyword-Index
-            content = chunk['content'].lower()
-            important_terms = [
-                'fobizz', 'genki', 'innovationsfonds', 'cop', 'cops',
-                'vernetzung', 'workshop', 'weiterbildung', 'kuratiert',
-                'impuls', 'termin', 'anmeldung', 'lunch', 'learn',
-                'impuls-workshop', 'impulsworkshop', 'veranstaltung', 'event',
-                'chemie', 'physik', 'biologie', 'mathematik', 'informatik',
-                'deutsch', 'englisch', 'franzAsisch', 'italienisch', 'spanisch',
-                'geschichte', 'geografie', 'wirtschaft', 'recht', 'philosophie'
-            ]
-            
-            for term in important_terms:
-                if term in content:
-                    if term not in keyword_index:
-                        keyword_index[term] = []
-                    keyword_index[term].append(i)
-        
-        print(f"Y Indexed {len(keyword_index)} keywords")
-        print(f"Ys Indexed {len(subject_index)} subjects in metadata")
-        
-        return chunks, keyword_index, url_index, subject_index
-    except Exception as e:
-        print(f"a Error loading data: {e}")
-        import traceback
-        traceback.print_exc()
-        return [], {}, {}, {}
-
-if __name__ == "__main__":
-    import uvicorn
-    uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
-    
-@app.on_event("startup")
-def _run_prompt_validation():
-    try:
-        _v = validate_prompts()
-        print("Y  prompt validation:", _v)
-    except Exception as _e:
-        print("Y  prompt validation ERROR:", repr(_e))
-
-
-
-# -----------------------------------------------------------------
-# Sitemap loader + simple section index
-# -----------------------------------------------------------------
-SITEMAP_URLS: list[str] = []
-SITEMAP_SECTIONS: dict[str, list[str]] = {}
-SITEMAP_LOADED = False
-
-def load_sitemap(local_path: str = "processed/dlh_sitemap.xml") -> dict[str, int]:
-    """
-    Lädt eine Standard-XML-Sitemap, indexiert URLs und einfache Sektions-Buckets.
-    """
-    global SITEMAP_URLS, SITEMAP_SECTIONS, SITEMAP_LOADED
-    stats = {"urls": 0, "sections": 0, "ok": 0}
-    try:
-        p = Path(local_path)
-        if not p.exists():
-            print("Sitemap not found at", local_path)
-            return stats
-        tree = ET.parse(str(p))
-        root = tree.getroot()
-        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
-        urls: list[str] = []
-        for u in root.findall("sm:url", ns):
-            loc = u.findtext("sm:loc", default="", namespaces=ns).strip()
-            if loc:
-                urls.append(loc)
-
-        buckets: dict[str, list[str]] = {}
-        KEYS = [
-            "impuls-workshops", "innovationsfonds", "genki", "vernetzung",
-            "weiterbildung", "kuratiertes", "cops", "wb-kompass", "fobizz", "schulalltag"
-        ]
-        for u in urls:
-            path = urllib.parse.urlparse(u).path.lower()
-            for k in KEYS:
-                if f"/{k}" in path:
-                    buckets.setdefault(k, []).append(u)
-
-        SITEMAP_URLS = urls
-        SITEMAP_SECTIONS = buckets
-        SITEMAP_LOADED = True
-        stats.update({"urls": len(urls), "sections": len(buckets), "ok": 1})
-        return stats
-    except Exception as e:
-        print("WARN: sitemap load failed:", repr(e))
-        return stats
-
-def sitemap_candidates_for_query(q: str, limit: int = 6) -> list[dict]:
-    """
-    Liefert priorisierte Kandidaten-URLs aus der Sitemap passend zur Query.
-    Formatiert als 'fake hits' wie aus dem Index (title/url/snippet/metadata.source).
-    """
-    if not SITEMAP_LOADED or not q:
-        return []
-    ql = q.lower()
-    hits: list[str] = []
-
-    if any(k in ql for k in ["impuls", "workshop"]):
-        hits += SITEMAP_SECTIONS.get("impuls-workshops", [])
-    if "innovationsfonds" in ql or "innovations" in ql:
-        hits += SITEMAP_SECTIONS.get("innovationsfonds", [])
-    if "genki" in ql:
-        hits += SITEMAP_SECTIONS.get("genki", [])
-    if "cops" in ql or "community" in ql:
-        hits += SITEMAP_SECTIONS.get("cops", [])
-    if "weiterbildung" in ql:
-        hits += SITEMAP_SECTIONS.get("weiterbildung", [])
-    if "kuratiert" in ql or "kuratiertes" in ql:
-        hits += SITEMAP_SECTIONS.get("kuratiertes", [])
-
-    seen = set()
-    out: list[dict] = []
-    for u in hits:
-        if u in seen:
-            continue
-        seen.add(u)
-        title_guess = urllib.parse.urlparse(u).path.rsplit("/", 1)[-1].replace("-", " ").strip().title() or "DLH Seite"
-        out.append({
-            "title": title_guess,
-            "url": u,
-            "snippet": "",
-            "metadata": {"source": u}
-        })
-        if len(out) >= limit:
-            break
-    return out
-
-def get_ranked_with_sitemap(query: str, max_items: int = 12) -> list[dict]:
-    """
-    Kombiniert Sitemap-Kandidaten (Boost) mit der bestehenden advanced_search.
-    Verändert advanced_search nicht; fügt nur eine Boost-Schicht davor.
-    """
-    try:
-        boosted = sitemap_candidates_for_query(query, limit=6)
-    except Exception:
-        boosted = []
-    try:
-        core = advanced_search(query, max_items=max_items)  # nutzt deine bestehende Funktion
-    except Exception:
-        core = []
-    seen = set()
-    merged: list[dict] = []
-    def key(h):
-        if isinstance(h, dict):
-            return h.get("url") or h.get("metadata", {}).get("source")
-        if isinstance(h, tuple) and len(h) >= 2 and isinstance(h[1], dict):
-            hh = h[1]
-            return hh.get("url") or hh.get("metadata", {}).get("source")
-        return None
-    for h in boosted + core:
-        u = key(h)
-        if not u or u in seen:
-            continue
-        seen.add(u)
-        merged.append(h if isinstance(h, dict) else h[1])
-        if len(merged) >= max_items:
-            break
-    return merged
-
-
-
-@app.on_event("startup")
-def _sitemap_startup_loader():
-    try:
-        stats = load_sitemap(os.getenv("DLH_SITEMAP_PATH", "processed/dlh_sitemap.xml"))
-        print("Y  sitemap loaded:", {"urls": stats.get("urls", 0), "sections": stats.get("sections", 0)})
-    except Exception as e:
-        print("Y  sitemap load ERROR:", repr(e))
-
-
+@app.get("/debug/impuls")
+def debug_impuls():
+    ev = fetch_live_impuls_workshops()
+    return {"count": len(ev), "sample": ev[:3]}
 
 @app.get("/debug/sitemap")
 def debug_sitemap():
@@ -1677,32 +571,13 @@ def debug_sitemap():
         "urls": len(SITEMAP_URLS),
         "sections": {k: len(v) for k, v in SITEMAP_SECTIONS.items()}
     }
-    
+
 @app.get("/_kb")
 def kb_info():
-    return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(CHUNKS_PATH)}    
-    
-def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
-    """
-    Liefert die URL der Innovationsfonds-Tag-Seite aus der Sitemap,
-    z. B. tag_slug='chemie' → .../innovationsfonds/.../tags/chemie
-    """
-    if not SITEMAP_LOADED or not tag_slug:
-        return None
-    for u in SITEMAP_URLS:
-        p = urllib.parse.urlparse(u).path.lower()
-        if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
-            return u
-    return None
+    return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(settings.chunks_path)}
 
+# Add any remaining utility and validation functions here, using logging as appropriate.
 
-    # 1) Aus Sitemap
-    if SITEMAP_LOADED:
-        for u in SITEMAP_URLS:
-            p = urllib.parse.urlparse(u).path.lower()
-            if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
-                return u
-
-    # 2) Fallback (bekannte DLH-Struktur)
-    fallback = f"https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{tag_slug}"
-    return fallback
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
