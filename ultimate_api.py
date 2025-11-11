@@ -8,21 +8,16 @@ import logging
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
+from traceback import format_exc
 
 import requests
 from bs4 import BeautifulSoup
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic_settings import BaseSettings
-class Settings(BaseSettings):
-    openai_api_key: str
-    openai_model: str = "gpt-5"
-    chunks_path: str
 
-    class Config:
-        env_file = ".env"
-from traceback import format_exc
+from pydantic_settings import BaseSettings
+from pydantic import ValidationError
 
 from openai import OpenAI
 
@@ -48,8 +43,10 @@ except ValidationError as e:
 # Initialize OpenAI client
 openai_client = OpenAI(
     api_key=settings.openai_api_key,
-    # Note: Add organization support if needed
+    # Include organization if needed:
+    # organization=os.getenv("OPENAI_ORG_ID", None),
 )
+
 
 # FastAPI application setup
 app = FastAPI(title="DLH OpenAI API", version="1.0")
