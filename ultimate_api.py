@@ -14,7 +14,15 @@ from bs4 import BeautifulSoup
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, BaseSettings, ValidationError
+from pydantic import BaseSettings
+from pydantic_settings import BaseSettings
+class Settings(BaseSettings):
+    openai_api_key: str
+    openai_model: str = "gpt-5"
+    chunks_path: str
+
+    class Config:
+        env_file = ".env"
 from traceback import format_exc
 
 from openai import OpenAI
