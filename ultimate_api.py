@@ -196,7 +196,16 @@ def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[da
                 pass
 
     return None
+    
+from datetime import date as _date
 
+def parse_de_date_to_date(text: str) -> Optional[_date]:
+    """
+    Nutzt parse_de_date(...) und gibt ein datetime.date (ohne Uhrzeit) zurück.
+    """
+    dt = parse_de_date(text)
+    return dt.date() if dt else None
+    
 def _normalize_dash(s: str) -> str:
     return s.replace("\u2013", "-").replace("\u2014", "-").replace("–","-").replace("—","-")
 
@@ -245,7 +254,7 @@ def dedupe_items(items, key=lambda x: (x.get('title','').lower().strip(), x.get(
         for a in section.find_all("a"):
             around = (a.get_text(" ", strip=True) + " " +
                       (a.find_parent().get_text(" ", strip=True) if a.find_parent() else ""))
-            d = _parse_date_de(around)
+            d = parse_de_date_to_date(around)
             if d:
                 events.append({
                     "date": d,
@@ -277,7 +286,7 @@ def fallback_events_from_chunks() -> List[Dict]:
         text = ch.get("content") or ch.get("snippet") or ""
         # naive Suche nach Zeilen mit Datum + Titel
         for line in text.split("\n"):
-            d = _parse_date_de(line)
+            d = parse_de_date_to_date(line)
             if d:
                 # Titel heuristisch: Rest der Zeile
                 title = re.sub(r".*?(20\d{2})\s*", "", line).strip()
@@ -828,79 +837,116 @@ IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops"
 def fetch_live_impuls_workshops() -> List[Dict]:
     """
     Liefert normalisierte Events:
-      [{"title": str, "url": str, "when": str, "date": date, "_d": date}, ...]
+      [
+        {
+          "title": str,
+          "url": str,
+          "when": str,          # Roh-Text aus der Seite (z.B. "11. Nov 2025, 17:15–18:00")
+          "date": datetime,     # geparstes Datum (UTC, mit Uhrzeit falls vorhanden)
+          "_d": date            # nur Datum (für einfache Vergleiche/Sortierung)
+        },
+        ...
+      ]
     """
+    UA = {"User-Agent": "DLH-Chatbot/1.0 (+https://dlh.zh.ch)"}
     try:
-        r = requests.get(IMPULS_URL, timeout=20, headers={"User-Agent": "DLH-Chatbot/1.0"})
+        r = requests.get(IMPULS_URL, timeout=20, headers=UA, allow_redirects=True)
         r.raise_for_status()
+        html = r.text
     except Exception as ex:
         print("LIVE FETCH ERROR (Impuls, GET):", repr(ex))
         return []
 
+    # BeautifulSoup mit Fallback (falls lxml doch fehlt)
     try:
-        soup = BeautifulSoup(r.text, "lxml")
+        soup = BeautifulSoup(html, "lxml")
     except Exception:
-        soup = BeautifulSoup(r.text, "html.parser")
+        soup = BeautifulSoup(html, "html.parser")
 
-    for sel in ["script","style","noscript",".cookie",".consent",".banner","header","footer","nav","aside"]:
+    # Offensichtliche Boilerplate entfernen
+    for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner", "header", "footer", "nav", "aside"]:
         for el in soup.select(sel):
             el.decompose()
 
     root = soup.select_one("main") or soup
-    raw: List[Dict] = []
 
-    # Generisch: li-Elemente mit oder ohne <time>
+    events_raw: List[Dict] = []
+
+    # ----------------------------
+    # A) Generischer Listen-Parser
+    #    (ol/ul > li, bevorzugt mit <time>, sonst Text)
+    # ----------------------------
     for li in root.select("ol li, ul li"):
-        text = li.get_text(" ", strip=True)
-        if not text:
+        txt = li.get_text(" ", strip=True)
+        if not txt:
             continue
+
         a = li.find("a")
-        title = a.get_text(" ", strip=True) if a else text
+        title = a.get_text(" ", strip=True) if a else txt
         href = a.get("href") if (a and a.has_attr("href")) else ""
         if href and href.startswith("/"):
             href = urllib.parse.urljoin(IMPULS_URL, href)
-        time_el = li.find("time")
-        when = time_el.get_text(" ", strip=True) if time_el else text
-        raw.append({"title": title, "url": href or IMPULS_URL, "when": when})
 
-    # Fallback: unter Überschriften mit „Impuls“
-    if not raw:
-        for h in root.select("h2, h3"):
-            if "impuls" not in h.get_text(" ", strip=True).lower():
-                continue
-            sec = h.find_next(["ol","ul","section","div"]) or root
+        # Datumskandidat: <time> … oder fallback auf den gesamten LI-Text
+        time_el = li.find("time")
+        when = time_el.get_text(" ", strip=True) if time_el else txt
+
+        events_raw.append({"title": title, "url": href or IMPULS_URL, "when": when})
+
+    # ----------------------------
+    # B) Fallback: Blöcke unter H2/H3 mit "Impuls"
+    # ----------------------------
+    if not events_raw:
+        heads = [h for h in root.select("h2, h3") if "impuls" in h.get_text(" ", strip=True).lower()]
+        for h in heads:
+            sec = h.find_next(["ol", "ul", "section", "div"]) or root
             for li in sec.select("li"):
-                text = li.get_text(" ", strip=True)
-                if not text:
+                txt = li.get_text(" ", strip=True)
+                if not txt:
                     continue
                 a = li.find("a")
-                title = a.get_text(" ", strip=True) if a else text
+                title = a.get_text(" ", strip=True) if a else txt
                 href = a.get("href") if (a and a.has_attr("href")) else ""
                 if href and href.startswith("/"):
                     href = urllib.parse.urljoin(IMPULS_URL, href)
                 time_el = li.find("time")
-                when = time_el.get_text(" ", strip=True) if time_el else text
-                raw.append({"title": title, "url": href or IMPULS_URL, "when": when})
+                when = time_el.get_text(" ", strip=True) if time_el else txt
+                events_raw.append({"title": title, "url": href or IMPULS_URL, "when": when})
 
-    # Datum normalisieren
-    events: List[Dict] = []
-    seen = set()
-    for e in raw:
-        dt = _parse_date_de(e.get("when") or "") or _parse_date_de(e.get("title") or "")
+    # ----------------------------
+    # Normalisieren + Datum parsen
+    # ----------------------------
+    norm: List[Dict] = []
+    for e in events_raw:
+        dt = parse_de_date_to_date(e.get("when") or "") or parse_de_date_to_date(e.get("title") or "")
         if not dt:
-            dt = _parse_date_de(f"{e.get('title','')} {e.get('when','')}")
+            # als allerletzte Chance: versuche nochmal auf dem gesamten Text
+            all_txt = f"{e.get('title','')} {e.get('when','')}"
+            dt = parse_de_date_to_date(all_txt)
         if not dt:
+            # Event ohne erkennbares Datum überspringen
             continue
-        e["_d"] = dt
-        key = (dt.isoformat(), e["title"])
+        item = dict(e)
+        item["date"] = dt
+        item["_d"] = dt.date()
+        norm.append(item)
+
+    # Deduplizieren (Titel + Datum)
+    seen = set()
+    cleaned: List[Dict] = []
+    for e in norm:
+        key = (e["_d"].isoformat(), e["title"])
         if key in seen:
             continue
         seen.add(key)
-        events.append(e)
+        cleaned.append(e)
 
-    events.sort(key=lambda x: x["_d"])
-    print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(events)} events (raw {len(raw)})")
-    return events
+    # Sortieren (aufsteigend nach Datum)
+    cleaned.sort(key=lambda x: x["_d"])
+
+    print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events_raw)})")
+    return cleaned
+        
 from datetime import datetime, timezone
 import re
 
@@ -972,7 +1018,7 @@ def _event_to_date(e: Dict) -> Optional[datetime]:
         return d
     # Quelle bevorzugt: 'when', sonst 'title'
     txt = e.get("when") or e.get("title") or ""
-    dt = parse_de_date(txt)
+    dt = parse_de_date_to_date(txt)
     return dt  
 
 @app.get("/debug/impuls")
@@ -1522,10 +1568,10 @@ def debug_sitemap():
         "urls": len(SITEMAP_URLS),
         "sections": {k: len(v) for k, v in SITEMAP_SECTIONS.items()}
     }
-
+    
 @app.get("/_kb")
 def kb_info():
-    return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(CHUNKS_PATH)}
+    return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(CHUNKS_PATH)}    
     
 def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
     """
