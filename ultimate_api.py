@@ -52,6 +52,45 @@ openai_client = OpenAI(
     organization=os.getenv("OPENAI_ORG_ID") or None,
 )
 
+# -----------------------------
+# Load processed chunks
+# -----------------------------
+# --- KB loading (supports .json and .jsonl) ---
+# --- Knowledge Base loading (supports .json and .jsonl) ---
+from pathlib import Path
+
+CHUNKS_PATH = os.getenv("CHUNKS_PATH", "processed/processed_chunks.json")
+
+def load_chunks(path: str):
+    """Lädt die Wissensbasis (.json oder .jsonl) sicher und robust."""
+    p = Path(path)
+    if not p.exists():
+        print(f"⚠️ KB not found at {p.resolve()}")
+        return []
+    if p.suffix == ".jsonl":
+        out = []
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    continue
+        return out
+    else:
+        try:
+            return json.load(p.open("r", encoding="utf-8"))
+        except Exception as e:
+            print("Failed to load chunks:", e)
+            return []
+
+# Datei laden
+CHUNKS: list[dict] = load_chunks(CHUNKS_PATH)
+CHUNKS_COUNT = len(CHUNKS)
+print(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
+
 # --- Komfort-Endpoints (optional, aber hilfreich) ---
 @app.get("/health")
 def health():
@@ -66,26 +105,6 @@ def version():
 @app.api_route("/", methods=["GET", "HEAD"])
 def root():
     return {"ok": True, "service": "DLH OpenAI API", "endpoints": ["/health", "/ask", "/version"]}
-
-# -----------------------------
-# Load processed chunks
-# -----------------------------
-CHUNKS: List[Dict] = []
-ROOT = Path(__file__).parent
-for candidate in [
-    ROOT / "processed" / "processed_chunks.json",
-    ROOT / "processed_chunks.json",
-    Path("/mnt/data/processed_chunks.json"),
-]:
-    if candidate.exists():
-        try:
-            CHUNKS = json.loads(candidate.read_text(encoding="utf-8"))
-            print(f"Loaded {len(CHUNKS)} chunks from {candidate}")
-            break
-        except Exception as e:
-            print("Failed to load chunks:", e)
-if not CHUNKS:
-    print("⚠️ No processed_chunks.json found; running without local context.")
 
 # -----------------------------
 # Date parsing (German)
@@ -513,10 +532,10 @@ def normalize_subject(text: str) -> Optional[str]:
     t = (text or "").strip().lower()
     return SUBJECT_SLUGS.get(t)
 
-def advanced_search(query: str, max_items: int = 8) -> List[Tuple[int, Dict]]:
-    intent = extract_query_intent(query)
-    query_lower = intent["query_lower"]
-    results: List[Tuple[int, Dict]] = []
+def advanced_search(query: str, max_items: int = None):
+    # ... your current ranking ...
+    topk = max_items or RANK_TOPK
+    return ranked[:topk]
 
     # Workshops live
     if intent["is_date_query"] or any(k in query_lower for k in ["impuls", "workshop", "termine", "veranstaltung", "events"]):
@@ -599,41 +618,30 @@ def build_system_prompt() -> str:
         "</section>\n"
     )
 def build_user_prompt(question: str, hits: List[Dict]) -> str:
-    """Erzeugt einen präzisen Prompt für GPT mit Frage, Datum und relevanten Auszügen."""
-    today = datetime.now(timezone.utc).strftime("%d.%m.%Y")
-
-    # 🔧 WICHTIG: Treffer zuerst normalisieren (Dict oder (score, dict) → Dict)
-    norm_hits: List[Dict] = [_as_dict(h) for h in hits]
-
+    """Erzeugt den Prompt für das LLM mit Query, Datum und relevanten Textauszügen."""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     parts = [
         f"Heutiges Datum: {today}",
         f"Benutzerfrage: {question}",
         "",
-        "Kontext: Nachfolgend findest du relevante Informationen aus Webseiten und Dokumenten:",
-        ""
+        "Relevante Auszüge:"
     ]
 
-    for i, h in enumerate(norm_hits[:12], start=1):
-        title = h.get("title") or h.get("metadata", {}).get("title") or "Ohne Titel"
-        url = h.get("url") or h.get("metadata", {}).get("source") or ""
-        snippet = (
-            h.get("snippet")
-            or h.get("content")
-            or h.get("metadata", {}).get("description")
-            or ""
-        )
-        snippet = snippet[:350].replace("\n", " ").strip()
-
-        parts.append(
-            f"{i}. Quelle: {title} ({url})\n"
-            f"   Auszug: {snippet}"
-        )
+    used = 0
+    for h in hits:
+        title = h.get("metadata", {}).get("title") or h.get("title") or "Ohne Titel"
+        url = h.get("metadata", {}).get("source") or h.get("url") or ""
+        snippet = (h.get("content") or h.get("snippet") or "")[:400].replace("\n", " ").strip()
+        block = f"- {title} — {url}\n  {snippet}\n"
+        if used + len(block) > PROMPT_CHARS_BUDGET:
+            break
+        parts.append(block)
+        used += len(block)
 
     parts.append(
-        "\nAufgabe: Formuliere die Antwort in sauberem HTML, wie im System-Prompt beschrieben. "
-        "Wenn es sich um eine Termin- oder Projektliste handelt, fasse die Informationen übersichtlich zusammen. "
-        "Verwende Listen (<ul>, <ol>) oder Tabellen, wenn sinnvoll. "
-        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a> und gib am Ende eine kurze Liste der Quellen aus."
+        "Aufgabe: Antworte in sauberem HTML, wie im System-Prompt beschrieben. "
+        "Verwende Listen (<ul><li>…</li></ul>) oder Karten, wenn sinnvoll. "
+        "Verlinke Quellen mit <a href='URL' target='_blank'>Titel</a>."
     )
 
     return "\n".join(parts)
@@ -654,22 +662,21 @@ def call_openai(system_prompt: str, user_prompt: str, max_tokens: int = 1200) ->
 # -----------------------------
 # Sources builder
 # -----------------------------
-def build_sources(hits: List[Dict], limit: int = 3) -> List[SourceItem]:
+def build_sources(ranked, limit: int | None = None):
+    lim = limit or MAX_SOURCES
+    out = []
     seen = set()
-    out: List[SourceItem] = []
-
-    # 🔧 Normalisieren (Dict oder (score, dict) → Dict)
-    for h in [_as_dict(h) for h in hits]:
-        url = h.get("url") or h.get("source") or h.get("metadata", {}).get("source")
+    for h in ranked:
+        url = h.get("metadata", {}).get("source") or h.get("url")
         if not url or url in seen:
             continue
         seen.add(url)
         out.append(SourceItem(
-            title=h.get("title") or h.get("metadata", {}).get("title") or "Quelle",
+            title=h.get("metadata", {}).get("title") or h.get("title"),
             url=url,
-            snippet=(h.get("snippet") or h.get("text") or h.get("content") or "")[:240]
+            snippet=h.get("metadata", {}).get("snippet") or h.get("snippet")
         ))
-        if len(out) >= limit:
+        if len(out) >= lim:
             break
     return out
     
