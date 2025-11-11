@@ -1251,19 +1251,19 @@ def ask(req: QuestionRequest):
                 answer=html,
                 sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
             )
-                # Default: alle ab heute
-                future_sorted = sorted(future, key=lambda x: x["date"])
-                html = render_workshops_timeline_html(
-                    future_sorted,
-                    title="Kommende Impuls-Workshops",
-                )
-                return AnswerResponse(
-                    answer=html,
-                    sources=[SourceItem(
-                        title="Impuls-Workshop-Übersicht",
-                        url=IMPULS_URL,
-                    )],
-                )
+            # Default: alle ab heute
+            future_sorted = sorted(future, key=lambda x: x["date"])
+            html = render_workshops_timeline_html(
+                future_sorted,
+                title="Kommende Impuls-Workshops",
+            )
+            return AnswerResponse(
+                answer=html,
+                sources=[SourceItem(
+                    title="Impuls-Workshop-Übersicht",
+                    url=IMPULS_URL,
+                )],
+            )
             # Default: alle ab heute
             future_sorted = sorted(future, key=lambda x: x["date"])
             html = render_workshops_timeline_html(
