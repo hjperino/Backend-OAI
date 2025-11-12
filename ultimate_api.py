@@ -3,14 +3,14 @@ import json
 import re
 import urllib.parse
 import logging
-from datetime import datetime, timezone, date as _date
-
-from typing import List, Dict, Optional, Tuple
-from pathlib import Path
-
+import html
+import inspect
 import requests
-from bs4 import BeautifulSoup
 
+from datetime import datetime, timezone, date as _date
+from typing import List, Dict, Optional, Tuple, Union, Set
+from pathlib import Path
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
@@ -255,7 +255,7 @@ for e in events_raw:
     norm.append(item)
 norm.sort(key=lambda x: x["d"])
 logger.info(f"LIVE FETCH SUCCESS Impuls parsed {len(norm)} events raw {len(events_raw)}")
-return norm
+    return norm
 
 
 # Pydantic models for API
@@ -376,19 +376,29 @@ def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[da
             pass
 
     return None
-
-from datetime import date as _date
-
-def parse_de_date_to_date(text: str) -> Optional[_date]:
-    """
-    Helper to parse German date string and return datetime.date.
-    """
-    dt = parse_de_date(text)
-    return dt.date() if dt else None
     
-# Part 3 of ultimate_api-Kopie.py
+def _event_to_date(e: dict) -> Optional[date]:
+    # Example: try several fields to extract a date.
+    # Adjust field names as per your scraping logic!
+    if not isinstance(e, dict):
+        return None
+    # Try 'date' or 'd' field (already a date)
+    d = e.get("date") or e.get("d")
+    if isinstance(d, (datetime, date)):
+        return d
+    # Try extracting from 'when' or 'title' (string with a date)
+    date_str = e.get("when") or e.get("title")
+    if date_str:
+        try:
+            # Use your robust German date parsing here!
+            # Example: return parsededatetotext(date_str) or similar
+            parsed = parsededatetodatetext(date_str)
+            if parsed:
+                return parsed
+        except Exception:
+            return None
+    return None
 
-from typing import Set
 
 def _fetch_detail_snippet(url: str, max_chars: int = 400) -> str:
     """Holt einen kurzen Einleitungstext von der Projekt-Detailseite (best effort)."""
@@ -553,10 +563,54 @@ def fetch_live_impuls_workshops() -> List[Dict]:
     cleaned.sort(key=lambda x: x["_d"])
     logger.info(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events_raw)})")
     return cleaned
-    
-# Part 4 of ultimate_api-Kopie.py
+    # After parsing events:
+    if not events_to_show:
+        return AnswerResponse(
+            answer="<p>Keine passenden Workshops gefunden.</p>",
+            sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+        )
+def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
+    """
+    Liefert die URL der Innovationsfonds-Tag-Seite aus der Sitemap,
+    z. B. tag_slug='chemie' → .../innovationsfonds/.../tags/chemie
+    """
+    if not SITEMAP_LOADED or not tag_slug:
+        return None
+    for u in SITEMAP_URLS:
+        p = urllib.parse.urlparse(u).path.lower()
+        if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
+            return u
+    return None
 
-from typing import Union
+
+    # 1) Aus Sitemap
+    if SITEMAP_LOADED:
+        for u in SITEMAP_URLS:
+            p = urllib.parse.urlparse(u).path.lower()
+            if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
+                return u
+
+    # 2) Fallback (bekannte DLH-Struktur)
+    fallback = f"https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{tag_slug}"
+    return fallback
+
+SUBJECT_SLUGS = {
+    "chemie": "chemie",
+    "physik": "physik",
+    "biologie": "biologie",
+    "mathematik": "mathematik",
+    "informatik": "informatik",
+    "deutsch": "deutsch",
+    "englisch": "englisch",
+    "franzoesisch": "franzoesisch",  # nur diese Schreibweise
+    "italienisch": "italienisch",
+    "spanisch": "spanisch",
+    "geschichte": "geschichte",
+    "geografie": "geografie",
+    "wirtschaft": "wirtschaft",
+    "recht": "recht",
+    "philosophie": "philosophie",
+}
 
 def fetch_live_innovationsfonds(subject: Optional[str] = None) -> Optional[Dict]:
     base = "https://dlh.zh.ch"
@@ -610,56 +664,13 @@ def fetch_live_innovationsfonds(subject: Optional[str] = None) -> Optional[Dict]
             "fetched_live": True
         },
     }
-def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
-    """
-    Liefert die URL der Innovationsfonds-Tag-Seite aus der Sitemap,
-    z. B. tag_slug='chemie' → .../innovationsfonds/.../tags/chemie
-    """
-    if not SITEMAP_LOADED or not tag_slug:
-        return None
-    for u in SITEMAP_URLS:
-        p = urllib.parse.urlparse(u).path.lower()
-        if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
-            return u
-    return None
+    # After parsing events:
+    if not events_to_show:
+        return AnswerResponse(
+            answer="<p>Keine passenden Workshops gefunden.</p>",
+            sources=[SourceItem(title="Innovationsfonds Projekte - Übersicht", url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht")]
+        )
 
-
-    # 1) Aus Sitemap
-    if SITEMAP_LOADED:
-        for u in SITEMAP_URLS:
-            p = urllib.parse.urlparse(u).path.lower()
-            if "/innovationsfonds" in p and "/tags/" in p and p.endswith(f"/{tag_slug}"):
-                return u
-
-    # 2) Fallback (bekannte DLH-Struktur)
-    fallback = f"https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{tag_slug}"
-    return fallback
-
-SUBJECT_SLUGS = {
-    "chemie": "chemie",
-    "physik": "physik",
-    "biologie": "biologie",
-    "mathematik": "mathematik",
-    "informatik": "informatik",
-    "deutsch": "deutsch",
-    "englisch": "englisch",
-    "franzoesisch": "franzoesisch",  # nur diese Schreibweise
-    "italienisch": "italienisch",
-    "spanisch": "spanisch",
-    "geschichte": "geschichte",
-    "geografie": "geografie",
-    "wirtschaft": "wirtschaft",
-    "recht": "recht",
-    "philosophie": "philosophie",
-}
-
-# Utility to safely extract dict from either dict or (score, dict) tuple
-def _as_dict(hit: Union[Dict, Tuple[int, Dict]]) -> Dict:
-    if isinstance(hit, dict):
-        return hit
-    if isinstance(hit, tuple) and len(hit) > 1 and isinstance(hit[1], dict):
-        return hit[1]
-    return {}
 
 def build_system_prompt() -> str:
     return (
@@ -696,8 +707,6 @@ def ensure_clickable_links(html_text: str) -> str:
         u = m.group(1)
         return f"<a href='{html.escape(u)}' target='_blank'>{html.escape(u)}</a>"
     return url_re.sub(repl, html_text)
-
-import inspect
 
 REQUIRED_SYS_HINTS = [
     "valide", "HTML", "Quellen", "<a href", "Liste", "Timeline"  # locker gehalten
@@ -847,9 +856,6 @@ def build_user_prompt(question: str, hits: List[Dict]) -> str:
     return "\n".join(parts)
 
 # Part 5 of ultimate_api-Kopie.py
-
-import html
-import inspect
 
 REQUIRED_SYS_HINTS = ["valide", "HTML", "Quellen"]
 
@@ -1195,7 +1201,14 @@ def ask(req: QuestionRequest):
         return AnswerResponse(answer=msg, sources=[])
 
 # ========== Utility and monitoring endpoints ==========
-
+# Utility to safely extract dict from either dict or (score, dict) tuple
+def _as_dict(hit: Union[Dict, Tuple[int, Dict]]) -> Dict:
+    if isinstance(hit, dict):
+        return hit
+    if isinstance(hit, tuple) and len(hit) > 1 and isinstance(hit[1], dict):
+        return hit[1]
+    return {}
+    
 @app.get("/debug/validate")
 def debug_validate():
     """Runs prompt validation without calling OpenAI."""
