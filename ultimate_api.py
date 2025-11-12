@@ -3,6 +3,14 @@ import json
 import re
 import urllib.parse
 import logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+try:
+    settings = Settings()
+    logger.info("...")
+except ValidationError:
+    logger.critical("...")
+
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -44,6 +52,18 @@ openai_client = OpenAI(
     api_key=settings.openai_api_key,
     # organization=settings.openai_org_id,  # Uncomment and add field if needed
 )
+PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
+
+# optionale Feintuning-Parameter
+MAX_HITS_IN_PROMPT   = 12   # höchstens so viele Treffer einbetten
+MAX_SNIPPET_CHARS    = 800  # pro Treffer; wird vor dem Einfügen gekürzt
+CHUNKS_PATH = os.getenv("CHUNKS_PATH", "processed/processed_chunks.json")
+
+# Datei laden
+CHUNKS: list[dict] = load_chunks(CHUNKS_PATH)
+CHUNKS_COUNT = len(CHUNKS)
+logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
+
 
 def get_ranked_with_sitemap(query: str, max_items: int = 12) -> list[dict]:
     """
@@ -104,31 +124,38 @@ class QuestionRequest(BaseModel):
     max_sources: Optional[int] = 3
 
 # Load knowledge base chunks, support .json and .jsonl formats
-def load_chunks(path: str) -> List[Dict]:
+CHUNKS_PATH = os.getenv("CHUNKS_PATH", "processed/processed_chunks.json")
+
+def load_chunks(path: str):
+    """Lädt die Wissensbasis (.json oder .jsonl) sicher und robust."""
     p = Path(path)
     if not p.exists():
         logger.warning(f"⚠️ KB not found at {p.resolve()}")
         return []
+    if p.suffix == ".jsonl":
+        out = []
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    out.append(json.loads(line))
+                except Exception:
+                    logger.debug(f"Skipping invalid JSON line in {path}")
+                    continue
+        return out
+    else:
+        try:
+            return json.load(p.open("r", encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"Failed to load chunks from {path}: {e}")
+            return []
 
-    try:
-        if p.suffix == ".jsonl":
-            out = []
-            with p.open("r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        out.append(json.loads(line))
-                    except json.JSONDecodeError as e:
-                        logger.debug(f"Skipping bad JSON line in chunks: {e}")
-            return out
-        else:
-            with p.open("r", encoding="utf-8") as f:
-                return json.load(f)
-    except Exception as e:
-        logger.error(f"Failed to load chunks: {e}")
-        return []
+# Datei laden
+CHUNKS: list[dict] = load_chunks(CHUNKS_PATH)
+CHUNKS_COUNT = len(CHUNKS)
+logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
 
 CHUNKS: List[Dict] = load_chunks(settings.chunks_path)
 logger.info(f"✅ Loaded {len(CHUNKS)} chunks from {settings.chunks_path}")
