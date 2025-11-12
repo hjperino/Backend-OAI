@@ -3,7 +3,8 @@ import json
 import re
 import urllib.parse
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timezone, date as _date
+
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
 
@@ -410,6 +411,60 @@ def parse_de_date_to_date(text: str) -> Optional[_date]:
 
 from typing import Set
 
+def _fetch_detail_snippet(url: str, max_chars: int = 400) -> str:
+    """Holt einen kurzen Einleitungstext von der Projekt-Detailseite (best effort)."""
+    try:
+        r = requests.get(url, timeout=10)
+        r.raise_for_status()
+    except Exception:
+        return ""
+
+    soup = BeautifulSoup(r.text, "html.parser")
+    main = soup.select_one("main") or soup
+
+    # Heuristik: erster sinnvoller Absatz
+    for selector in ["article p", ".content p", "main p", "p"]:
+        p = main.select_one(selector)
+        if p and p.get_text(strip=True):
+            txt = p.get_text(" ", strip=True)
+            txt = re.sub(r"\s+", " ", txt).strip()
+            if len(txt) > 40:  # sehr kurze Platzhalter vermeiden
+                return (txt[:max_chars].rstrip() + "…") if len(txt) > max_chars else txt
+    return ""
+
+def build_sources(hits: list, limit=3) -> list:
+    """
+    Formats and deduplicates the sources for output.
+    """
+    result = []
+    seen = set()
+    for h in hits:
+        if isinstance(h, dict):
+            title = h.get("title") or h.get("metadata", {}).get("title")
+            url = h.get("url") or h.get("metadata", {}).get("source")
+            snippet = h.get("snippet") or h.get("metadata", {}).get("snippet", "")
+        elif isinstance(h, tuple) and len(h) > 1 and isinstance(h[1], dict):
+            hh = h[1]
+            title = hh.get("title") or hh.get("metadata", {}).get("title")
+            url = hh.get("url") or hh.get("metadata", {}).get("source")
+            snippet = hh.get("snippet") or hh.get("metadata", {}).get("snippet", "")
+        else:
+            continue
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        result.append(
+            {
+                "title": title or url,
+                "url": url,
+                "snippet": snippet[:180] if snippet else "",
+            }
+        )
+        if len(result) >= limit:
+            break
+    return result
+
+
 def dedupe_items(
     items: List[Dict],
     key=lambda x: (x.get("title", "").lower().strip(), x.get("when", ""))
@@ -600,6 +655,24 @@ def sitemap_find_innovations_tag(tag_slug: str) -> Optional[str]:
     # 2) Fallback (bekannte DLH-Struktur)
     fallback = f"https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht/filterergebnisse-fuer-projekte/tags/{tag_slug}"
     return fallback
+
+SUBJECT_SLUGS = {
+    "chemie": "chemie",
+    "physik": "physik",
+    "biologie": "biologie",
+    "mathematik": "mathematik",
+    "informatik": "informatik",
+    "deutsch": "deutsch",
+    "englisch": "englisch",
+    "franzoesisch": "franzoesisch",  # nur diese Schreibweise
+    "italienisch": "italienisch",
+    "spanisch": "spanisch",
+    "geschichte": "geschichte",
+    "geografie": "geografie",
+    "wirtschaft": "wirtschaft",
+    "recht": "recht",
+    "philosophie": "philosophie",
+}
 
 # Utility to safely extract dict from either dict or (score, dict) tuple
 def _as_dict(hit: Union[Dict, Tuple[int, Dict]]) -> Dict:
