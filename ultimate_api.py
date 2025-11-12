@@ -2,18 +2,7 @@ import os
 import json
 import re
 import urllib.parse
-from pydantic_settings import BaseSettings
-from pydantic import BaseModel, ValidationError
-from pydantic import ValidationError
 import logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
-try:
-    settings = Settings()
-    logger.info("...")
-except ValidationError:
-    logger.critical("...")
-
 from datetime import datetime, timezone
 from typing import List, Dict, Optional, Tuple
 from pathlib import Path
@@ -24,6 +13,9 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
+
+from pydantic_settings import BaseSettings
+from pydantic import BaseModel, ValidationError
 
 from openai import OpenAI
 
@@ -51,6 +43,7 @@ openai_client = OpenAI(
     api_key=settings.openai_api_key,
     # organization=settings.openai_org_id,  # Uncomment and add field if needed
 )
+
 PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 
 # optionale Feintuning-Parameter
