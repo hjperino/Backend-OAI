@@ -255,7 +255,7 @@ for e in events_raw:
     norm.append(item)
 norm.sort(key=lambda x: x["d"])
 logger.info(f"LIVE FETCH SUCCESS Impuls parsed {len(norm)} events raw {len(events_raw)}")
-    return norm
+return norm
 
 
 # Pydantic models for API
