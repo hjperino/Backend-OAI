@@ -228,6 +228,12 @@ def ask(req: QuestionRequest):
             raw_text = ch.get('snippet') or ch.get('text', '')
             snippet = summarize_long_text(raw_text)
             sources.append(SourceItem(title=title, url=url, snippet=snippet))
+    except Exception as e:
+        msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
+        logger.error("ERROR /ask: %s\n%s", repr(e), format_exc())
+        logger.info(f"Returning answer: {repr(msg)[:400]}")
+        return AnswerResponse(answer=msg, sources=[])
+            
     try:
         # other logic
         sources = ...  # define your sources list
