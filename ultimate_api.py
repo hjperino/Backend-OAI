@@ -168,8 +168,6 @@ def ask(req: QuestionRequest):
         q_low = (req.question or "").lower().strip()
 
         # =================== Workshops Branch ===================
-from datetime import datetime
-from typing import List
 
 def build_upcoming_workshops(chunks: List[dict]):
     today = datetime.now().date()
