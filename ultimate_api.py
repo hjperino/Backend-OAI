@@ -13,7 +13,7 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
-from pydantic import BaseModel, ValidationError, BaseSettings
+from pydantic import BaseModel, ValidationError, Pydantic-Settings
 from openai import OpenAI
 
 CHUNKSPATH = os.getenv("CHUNKSPATH", "processed/processed_chunks.json")
