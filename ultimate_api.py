@@ -14,6 +14,23 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
 from pydantic import BaseModel, ValidationError
+from pydantic import BaseModel
+
+class SourceItem(BaseModel):
+    title: str
+    url: str
+    date: str
+    description: Optional[str] = None
+    date: Optional[str] = None  # or datetime if you prefer
+    author: Optional[str] = None
+    tags: Optional[List[str]] = None
+    content_type: Optional[str] = None
+    # Add any other fields you expect
+
+class AnswerResponse(BaseModel):
+    answer: str
+    sources: list[SourceItem] = []
+
 from pydantic_settings import BaseSettings
 
 class Settings (BaseSettings):
