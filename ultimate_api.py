@@ -871,6 +871,14 @@ def fetch_live_impuls_workshops() -> List[Dict]:
     logger.info(f"LIVE FETCH SUCCESS Impuls parsed {len(norm)} events raw {len(events_raw)}")
     return norm
 
+def get_upcoming_workshops(chunks):
+    today = datetime.now().date()
+    upcoming = [
+        ch for ch in chunks
+        if ch.get("type") == "workshop" and dateparser.parse(ch.get("date", "")) >= today
+    ]
+    return upcoming
+
 def fallback_events_from_chunks() -> List[Dict]:
     """Fallback for workshops if live fetch fails: use pre-chunked events."""
     out = []
