@@ -17,9 +17,9 @@ from pydantic import BaseModel, ValidationError
 from pydantic_settings import BaseSettings
 
 class Settings (BaseSettings):
-    OPENAI_APIKEY: str
-    OPENAI_MODEL: str
-    CHUNKS_PATH: str
+    openai_apikey: str
+    openai_model: str
+    chunks_path: str
 settings = Settings()
 
 from openai import OpenAI
