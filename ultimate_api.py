@@ -15,9 +15,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
 from pydantic import BaseModel, ValidationError
 from pydantic_settings import BaseSettings
-from pydantic_settings import BaseSettings
 
-class Settings(BaseSettings):
+class BaseSettings:
     OPENAI_APIKEY: str
     OPENAI_MODEL: str
     CHUNKS_PATH: str
