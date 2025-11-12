@@ -58,7 +58,6 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
             {"role": "user", "content": user_prompt}
         ],
         max_completion_tokens=max_tokens,
-        temperature=0.3,
         stream=False,
     )
     return response.choices[0].message.content.strip()
