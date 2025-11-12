@@ -57,7 +57,7 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": user_prompt}
         ],
-        max_tokens=max_tokens,
+        max_completion_tokens=max_tokens,
         temperature=0.3,
         stream=False,
     )
@@ -182,24 +182,22 @@ async def health():
 @app.post("/ask", response_model=AnswerResponse)
 async def ask(req: QuestionRequest):
     try:
-        # 1. Get relevant sources for the question
         ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
-        logger.debug(f"Y ranked types: {[type(x).__name__ for x in ranked[:5]]}")
-
-        # 2. Build prompts for OpenAI
+        q_low = req.question.lower() if req.question else ""
+        
+        # Direct early handling for Impuls-Workshop questions
+        if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
+            events = fetchliveimpulsworkshops()
+            html = render_workshopstimeline_html(events, title="Kommende Impuls-Workshops")
+            sources = [SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+            return AnswerResponse(answer=html, sources=sources)
+        
+        # General LLM workflow
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(req.question, ranked)
-        logger.debug(f"Y LLM call {settings.openai_model} promptlen={len(user_prompt)}")
-
-        # 3. Get answer from OpenAI (using your actual call logic)
-        answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
-
-        # 4. Build sources output (limit as requested)
+        answer_html = ensure_clickable_links(call_openai(system_prompt, user_prompt, max_tokens=1200))
         sources = build_sources(ranked, limit=req.max_sources or 4)
-
-        # 5. Return the answer and sources in your expected format
         return AnswerResponse(answer=answer_html, sources=sources)
-
     except Exception as e:
         logger.error("ERROR /ask", exc_info=e)
         msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
