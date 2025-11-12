@@ -163,11 +163,30 @@ async def health():
 # Main ask endpoint (example impl)
 @app.post("/ask", response_model=AnswerResponse)
 async def ask(req: QuestionRequest):
-    logger.info(f"Received question: {req.question}")
-    # Dummy response for illustration
-    answer = "This is a placeholder answer."
-    sources = [SourceItem(title="Example Source", url="https://dlh.zh.ch/")]
-    return AnswerResponse(answer=answer, sources=sources)
+    try:
+        # 1. Get relevant sources for the question
+        ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
+        logger.debug(f"Y ranked types: {[type(x).__name__ for x in ranked[:5]]}")
+
+        # 2. Build prompts for OpenAI
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(req.question, ranked)
+        logger.debug(f"Y LLM call {settings.openai_model} promptlen={len(user_prompt)}")
+
+        # 3. Get answer from OpenAI (using your actual call logic)
+        answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
+
+        # 4. Build sources output (limit as requested)
+        sources = build_sources(ranked, limit=req.max_sources or 4)
+
+        # 5. Return the answer and sources in your expected format
+        return AnswerResponse(answer=answer_html, sources=sources)
+
+    except Exception as e:
+        logger.error("ERROR /ask", exc_info=e)
+        msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
+        return AnswerResponse(answer=msg, sources=[])
+
 
 MONTHS_DE = {
     "januar": 1, "jan": 1,
