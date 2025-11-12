@@ -722,6 +722,45 @@ def _truncate(s: str, n: int) -> str:
     s = s or ""
     return s if len(s) <= n else (s[: max(0, n - 1)] + "…")
 
+def dedupe_items(items, key=lambda x: (x.get('title','').lower().strip(), x.get('when',''))):
+    seen = set()
+    out = []
+    for it in items:
+        k = key(it)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append(it)
+    return out
+
+
+    # 3) fallback-Heuristik: suche einfach alle <a> in section mit Datum im Umfeld
+    if not events:
+        for a in section.find_all("a"):
+            around = (a.get_text(" ", strip=True) + " " +
+                      (a.find_parent().get_text(" ", strip=True) if a.find_parent() else ""))
+            d = _parse_date_de(around)
+            if d:
+                events.append({
+                    "date": d,
+                    "title": a.get_text(" ", strip=True),
+                    "url": urllib.parse.urljoin(url, a.get("href",""))
+                })
+
+    # 4) deduplizieren und sortieren
+    seen = set()
+    uniq: List[Dict] = []
+    for e in events:
+        key = (e.get("date"), e.get("title"))
+        if key in seen:
+            continue
+        seen.add(key)
+        uniq.append(e)
+
+    uniq.sort(key=lambda x: x.get("date") or datetime(2100,1,1, tzinfo=timezone.utc).date())
+    print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(uniq)} events (raw {len(events)})")
+    return uniq
+
 def build_user_prompt(question: str, hits: List[Dict]) -> str:
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     parts = [
