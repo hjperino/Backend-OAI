@@ -15,6 +15,17 @@ from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
 from pydantic import BaseModel, ValidationError
 from pydantic_settings import BaseSettings
+class Settings(BaseSettings):
+    openai_apikey: str
+    openai_model: str
+    chunks_path: processed/processed_chunks.json
+
+try:
+    settings = Settings()
+except Exception as e:
+    print("Settings validation error:", e)
+    raise
+
 from openai import OpenAI
 
 CHUNKSPATH = os.getenv("CHUNKSPATH", "processed/processed_chunks.json")
@@ -26,18 +37,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Config and Initialization ---
-
-class Settings(BaseSettings):
-    openai_apikey: str
-    openai_model: str = "gpt-5"
-    chunks_path: str
-
-try:
-    settings = Settings()
-    logger.info(f"OpenAI model: {settings.openai_model}, chunks path: {settings.chunks_path}")
-except ValidationError as e:
-    logger.critical(f"Environment settings validation failed: {e.json()}")
-    raise
 
 openai_client = OpenAI(api_key=settings.openai_apikey)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
