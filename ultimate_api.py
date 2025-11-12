@@ -130,7 +130,7 @@ app = FastAPI(title="DLH OpenAI API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["https://perino.info/"],  # Adjust to your needs
-    allow_credentials=True,  # False if allow_origins=["*"]
+    allow_credentials=False,  # False if allow_origins=["*"]
     allow_methods=["GET", "POST", "OPTIONS",],
     allow_headers=["*"],
 )
