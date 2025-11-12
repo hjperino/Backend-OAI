@@ -239,23 +239,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-norm = []
-seen = set()
-for e in events_raw:
-    dt = parse_de_date_to_date_text(e.get("when") or e.get("title") or "")
-    if not dt:
-        continue
-    key = (dt.isoformat(), e["title"])
-    if key in seen:
-        continue
-    seen.add(key)
-    item = dict(e)
-    item["date"] = dt
-    item["d"] = dt
-    norm.append(item)
-norm.sort(key=lambda x: x["d"])
-logger.info(f"LIVE FETCH SUCCESS Impuls parsed {len(norm)} events raw {len(events_raw)}")
-return norm
+def normalize_events(events_raw):
+    norm = []
+    seen = set()
+    for e in events_raw:
+        dt = parse_de_date_to_date_text(e.get("when") or e.get("title") or "")
+        if not dt:
+            continue
+        key = (dt.isoformat(), e["title"])
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(e)
+        item["date"] = dt
+        item["d"] = dt
+        norm.append(item)
+    norm.sort(key=lambda x: x["d"])
+    logger.info(f"LIVE FETCH SUCCESS Impuls parsed {len(norm)} events raw {len(events_raw)}")
+    return norm
+
 
 
 # Pydantic models for API
