@@ -542,12 +542,11 @@ def sitemap_find_innovations_tag(tag):
             return url
     return None
 
-
 def sitemap_candidates_for_query(q: str, limit: int = 6) -> List[Dict]:
     """Returns prioritized, fake-index hits from the sitemap for relevant sections based on query."""
-    if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-    answer_html, sources = build_upcoming_workshops(CHUNKS)
-    return AnswerResponse(answer=answer_html, sources=sources)
+    if any(k in q.lower() for k in ["impuls", "workshop", "workshops"]):
+        answer_html, sources = build_upcoming_workshops(CHUNKS)
+        return AnswerResponse(answer=answer_html, sources=sources)
 
 def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
     """Combines sitemap "boost" candidates with the core search, yielding a sorted hybrid result."""
