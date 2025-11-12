@@ -7,7 +7,7 @@ import html
 import inspect
 import requests
 
-from datetime import datetime, timezone, date as _date
+from datetime import datetime, timezone, date as _date, date
 from typing import List, Dict, Optional, Tuple, Union, Set
 from pathlib import Path
 from bs4 import BeautifulSoup
