@@ -103,9 +103,12 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
         return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
 
 def ensure_list(val):
-    """Normalize any value to a list. If None, returns []. If already a list, unchanged. If not a list, makes a single-item list."""
+    """Convert None to [], lists unchanged, single values/objects to [value], and AnswerResponse to list of its .sources."""
     if val is None:
         return []
+    # Special handling for AnswerResponse: extract .sources if present
+    if hasattr(val, "sources"):
+        return ensure_list(val.sources)
     if isinstance(val, list):
         return val
     return [val]
