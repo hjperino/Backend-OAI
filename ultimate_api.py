@@ -2,6 +2,9 @@ import os
 import json
 import re
 import urllib.parse
+from pydantic_settings import BaseSettings
+from pydantic import BaseModel, ValidationError
+from pydantic import ValidationError
 import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -21,11 +24,6 @@ from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
-
-from pydantic_settings import BaseSettings
-from pydantic.error_wrappers import ValidationError
-from pydantic import BaseModel
-from pydantic import ValidationError
 
 from openai import OpenAI
 
