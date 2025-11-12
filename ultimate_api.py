@@ -102,6 +102,29 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
         logger.error(f"OpenAI API ERROR: {repr(e)}\n{format_exc()}")
         return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
 
+def build_upcoming_workshops(chunks: List[dict]):
+    today = datetime.now().date()
+    upcoming = [
+        ch for ch in chunks
+        if ch.get('type') == 'workshop' and 'date' in ch and datetime.strptime(ch['date'], "%Y-%m-%d").date() >= today
+    ]
+    if not upcoming:
+        return "Keine Workshops gefunden.", []
+    upcoming = sorted(upcoming, key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d").date())
+    answer_html = "<ul>"
+    sources = []
+    for event in upcoming:
+        date_str = datetime.strptime(event['date'], "%Y-%m-%d").strftime("%d.%m.%Y")
+        answer_html += f"<li>{date_str}: <a href='{event.get('url')}' target='_blank'>{event.get('title', 'Workshop')}</a></li>"
+        sources.append(SourceItem(
+            title=event.get('title', 'Workshop'),
+            url=event.get('url', ''),
+            snippet=event.get('text', '')
+        ))
+    answer_html += "</ul>"
+    return answer_html, sources
+
+
 def summarize_long_text(text, max_length=180):
     # If short, just return as is
     if not text or len(text) < 200:
@@ -166,30 +189,6 @@ def ask(req: QuestionRequest):
     try:
         ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
         q_low = (req.question or "").lower().strip()
-
-        # =================== Workshops Branch ===================
-
-def build_upcoming_workshops(chunks: List[dict]):
-    today = datetime.now().date()
-    upcoming = [
-        ch for ch in chunks
-        if ch.get('type') == 'workshop' and 'date' in ch and datetime.strptime(ch['date'], "%Y-%m-%d").date() >= today
-    ]
-    if not upcoming:
-        return "Keine Workshops gefunden.", []
-    upcoming = sorted(upcoming, key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d").date())
-    answer_html = "<ul>"
-    sources = []
-    for event in upcoming:
-        date_str = datetime.strptime(event['date'], "%Y-%m-%d").strftime("%d.%m.%Y")
-        answer_html += f"<li>{date_str}: <a href='{event.get('url')}' target='_blank'>{event.get('title', 'Workshop')}</a></li>"
-        sources.append(SourceItem(
-            title=event.get('title', 'Workshop'),
-            url=event.get('url', ''),
-            snippet=event.get('text', '')
-        ))
-    answer_html += "</ul>"
-    return answer_html, sources
 
         # =============== Innovationsfonds Branch ===============
         if any(k in q_low for k in [
