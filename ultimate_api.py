@@ -37,17 +37,6 @@ try:
 except ValidationError as e:
     logger.critical(f"Environment settings validation failed: {e.json()}")
     raise
-const backendUrl = "https://404dlh-chatbot-api-openai.onrender.com";
-
-fetch(`${backendUrl}/ask`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ question: "Your question here" })
-})
-.then(response => response.json())
-.then(data => {
-  console.log(data);
-});
 
 # Initialize OpenAI client
 openai_client = OpenAI(
