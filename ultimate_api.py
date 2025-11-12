@@ -239,6 +239,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+    norm = []
+    seen = set()
+    for e in events_raw:
+        dt = parse_de_date_to_date_text(e.get("when") or e.get("title") or "")
+        if not dt:
+            continue
+        key = (dt.isoformat(), e["title"])
+        if key in seen:
+            continue
+        seen.add(key)
+        item = dict(e)
+        item["date"] = dt
+        item["d"] = dt
+        norm.append(item)
+    norm.sort(key=lambda x: x["d"])
+    logger.info(f"LIVE FETCH SUCCESS Impuls parsed {len(norm)} events raw {len(events_raw)}")
+    return norm
+
+
 # Pydantic models for API
 class SourceItem(BaseModel):
     title: Optional[str] = None
@@ -253,21 +272,6 @@ class QuestionRequest(BaseModel):
     question: str
     language: Optional[str] = "de"
     max_sources: Optional[int] = 3
-
-# Root endpoint for basic check
-@app.get("/")
-async def root():
-    return {"message": "DLH Chatbot API is up"}
-
-# Health check endpoint
-@app.get("/health")
-async def health():
-    return {"status": "ok"}
-    
-@app.get("/debug/impuls")
-def debug_impuls():
-    ev = fetch_live_impuls_workshops()
-    return {"count": len(ev), "sample": ev[:3]}
     
 def render_workshops_html(items: List[Dict]) -> str:
     """Erzeugt eine kompakte HTML-Timeline mit klickbaren Titeln."""
@@ -296,7 +300,7 @@ async def ask(req: QuestionRequest):
         
         # Direct early handling for Impuls-Workshop questions
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            events = fetchliveimpulsworkshops()
+            events = fetch_live_impuls_workshops()
             html = render_workshopstimeline_html(events, title="Kommende Impuls-Workshops")
             sources = [SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
             return AnswerResponse(answer=html, sources=sources)
@@ -888,34 +892,20 @@ def ensure_clickable_links(html_text: str) -> str:
 def ask(req: QuestionRequest):
     try:
         ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
-        logger.debug(f"Y ranked types: {[type(x).__name__ for x in ranked[:5]]}")
+        logger.debug(f"ranked types: {[type(x).__name__ for x in ranked[:5]]}")
+        q_low = (req.question or "").lower().strip()
 
-        q_low = (req.question or "").lower()
-
+        # Impuls-Workshop logic (always returns on match)
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            # Handle workshop early exit with live scraping and direct rendering
-            def _norm(s: str) -> str:
-                s = (s or "").lower()
-                return s.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
-            qn = _norm(req.question)
-            live = fetch_live_impuls_workshops()
-            if not live:
-                live = fallback_events_from_chunks()
-
-            want_past = any(k in qn for k in [
-                "gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"
-            ])
-            want_next = any(k in qn for k in [
-                "naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes",
-                "nur der naechste", "nur der nächste", "naechstes", "nächstes"
-            ])
+            qn = q_low.replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
+            live = fetch_live_impuls_workshops() or fallback_events_from_chunks()
+            want_past = any(k in qn for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"])
+            want_next = any(k in qn for k in ["naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes"])
             yr = None
             m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
             if m:
-                try:
-                    yr = int(m.group(1))
-                except Exception:
-                    yr = None
+                try: yr = int(m.group(1))
+                except Exception: yr = None
 
             norm = []
             for e in live or []:
@@ -924,11 +914,11 @@ def ask(req: QuestionRequest):
                     ee = dict(e)
                     ee["_d"] = d
                     norm.append(ee)
-
             today = datetime.now(timezone.utc).date()
             future = [e for e in norm if e.get("_d") and e["_d"] >= today]
             past = [e for e in norm if e.get("_d") and e["_d"] < today]
-
+            
+            # Next workshop
             if want_next:
                 events_to_show = sorted(future, key=lambda x: x["_d"])[:1]
                 html_str = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
@@ -936,6 +926,7 @@ def ask(req: QuestionRequest):
                     answer=html_str,
                     sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
                 )
+            # Past workshops, optionally filter by year
             if want_past:
                 if yr:
                     past = [e for e in past if e["_d"].year == yr]
@@ -953,6 +944,7 @@ def ask(req: QuestionRequest):
                 sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
             )
 
+        # Innovationsfonds logic (always returns on match)
         if any(k in q_low for k in [
             "innovationsfonds", "innovations-projekt", "innovationsprojekte",
             "projektvorstellungen", "projekte", "innovationsfond projekte", "innovationsfonds projekte"
@@ -968,18 +960,20 @@ def ask(req: QuestionRequest):
                         if cards and cards[0].get("url"):
                             srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet", "")))
                         return AnswerResponse(answer=html_str, sources=srcs)
-        # Default LLM path
+        # Default LLM path (always returns)
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(req.question, ranked)
-        logger.debug(f"Y LLM call → {settings.openai_model} | prompt_len: {len(user_prompt)}")
+        logger.debug(f"LLM call → {settings.openai_model} | prompt_len: {len(user_prompt)}")
         answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
         answer_html = ensure_clickable_links(answer_html)
         sources = build_sources(ranked, limit=req.max_sources or 4)
         return AnswerResponse(answer=answer_html, sources=sources)
+
     except Exception as e:
         logger.error("ERROR /ask: %s\n%s", repr(e), format_exc())
         msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
         return AnswerResponse(answer=msg, sources=[])
+
 
 def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
     if not events:
@@ -1225,6 +1219,8 @@ def load_and_preprocess_data():
         traceback.print_exc()
         return [], {}, {}, {}
 
+# ========== Utility and monitoring endpoints ==========
+
 @app.get("/debug/validate")
 def debug_validate():
     """Runs prompt validation without calling OpenAI."""
@@ -1248,7 +1244,47 @@ def debug_sitemap():
 def kb_info():
     return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(settings.chunks_path)}
 
-# Add any remaining utility and validation functions here, using logging as appropriate.
+# Root endpoint for basic check
+@app.get("/")
+async def root():
+    return {"message": "DLH Chatbot API is up"}
+
+# Health check endpoint
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "chunks_loaded": len(CHUNKS),
+        "model": settings.openai_model
+    }
+
+@app.get("/")
+def root():
+    return {
+        "ok": True,
+        "service": "DLH OpenAI API",
+        "endpoints": ["/health", "/ask", "/version", "/debug/deps"]
+    }
+
+@app.get("/version")
+def version():
+    return {
+        "version": "openai-backend",
+        "model": settings.openai_model,
+    }
+@app.get("/debug/deps")
+def debug_deps():
+    import platform
+    import openai as _openai_pkg
+    import bs4 as _bs4_pkg
+    import lxml as _lxml_pkg
+    return {
+        "python": platform.python_version(),
+        "openai": getattr(_openai_pkg, "__version__", "?"),
+        "bs4": getattr(_bs4_pkg, "__version__", "?"),
+        "lxml": getattr(_lxml_pkg, "__version__", "?"),
+    }
+
 
 if __name__ == "__main__":
     import uvicorn
