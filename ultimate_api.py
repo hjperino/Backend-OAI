@@ -228,9 +228,6 @@ def ask(req: QuestionRequest):
             raw_text = ch.get('snippet') or ch.get('text', '')
             snippet = summarize_long_text(raw_text)
             sources.append(SourceItem(title=title, url=url, snippet=snippet))
-
-# Compose answer from snippets
-def your_api_function(...):
     try:
         # other logic
         sources = ...  # define your sources list
