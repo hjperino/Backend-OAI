@@ -15,16 +15,12 @@ from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
 from pydantic import BaseModel, ValidationError
 from pydantic_settings import BaseSettings
-class Settings(BaseSettings):
-    openai_apikey: str
-    openai_model: str
-    chunks_path: str = "processed/processed_chunks.json"
+from pydantic_settings import BaseSettings
 
-try:
-    settings = Settings()
-except Exception as e:
-    print("Settings validation error:", e)
-    raise
+class Settings(BaseSettings):
+    OPENAI_APIKEY: str
+    OPENAI_MODEL: str
+    CHUNKS_PATH: str
 
 from openai import OpenAI
 
@@ -47,14 +43,6 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
-
-
-# --- Models for API ---
-
-class SourceItem(BaseModel):
-    title: Optional[str] = None
-    url: Optional[str] = None
-    snippet: Optional[str] = None
 
 class AnswerResponse(BaseModel):
     answer: str
