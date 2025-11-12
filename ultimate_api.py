@@ -545,7 +545,7 @@ def sitemap_find_innovations_tag(tag):
 
 def sitemap_candidates_for_query(q: str, limit: int = 6) -> List[Dict]:
     """Returns prioritized, fake-index hits from the sitemap for relevant sections based on query."""
-   if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
+    if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
     answer_html, sources = build_upcoming_workshops(CHUNKS)
     return AnswerResponse(answer=answer_html, sources=sources)
 
