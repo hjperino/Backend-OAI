@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
 
 from pydantic_settings import BaseSettings
-from pydantic import ValidationError
+from pydantic.error_wrappers import ValidationError
 from pydantic import BaseModel
 from pydantic import ValidationError
 
