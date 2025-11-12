@@ -37,7 +37,9 @@ class Settings (BaseSettings):
     openai_apikey: str
     openai_model: str
     chunks_path: str
+    
 settings = Settings()
+CHUNKS_PATH = settings.chunks_path
 
 from openai import OpenAI
 
