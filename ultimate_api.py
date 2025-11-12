@@ -18,7 +18,7 @@ from pydantic_settings import BaseSettings
 class Settings(BaseSettings):
     openai_apikey: str
     openai_model: str
-    chunks_path: processed/processed_chunks.json
+    chunks_path: str = "processed/processed_chunks.json"
 
 try:
     settings = Settings()
