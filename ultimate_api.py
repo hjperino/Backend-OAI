@@ -230,10 +230,14 @@ def ask(req: QuestionRequest):
             sources.append(SourceItem(title=title, url=url, snippet=snippet))
 
 # Compose answer from snippets
-if sources and any(s.snippet for s in sources):
-    answer_html = "<br><br>".join([f"<b>{s.title}</b>: {s.snippet}" for s in sources if s.snippet])
-else:
-    answer_html = "<p>Leider konnte keine passende Antwort gefunden werden.</p>"
+def your_api_function(...):
+    try:
+        # other logic
+        sources = ...  # define your sources list
+        if sources and any(s.snippet for s in sources):
+            answer_html = "<br><br>".join([f"<b>{s.title}</b>: {s.snippet}" for s in sources if s.snippet])
+        else:
+            answer_html = "<p>Leider konnte keine passende Antwort gefunden werden.</p>"
 
         logger.info(f"Returning answer: {repr(answer_html)[:400]}")
         response = AnswerResponse(answer=answer_html, sources=sources)
