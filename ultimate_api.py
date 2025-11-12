@@ -16,10 +16,11 @@ from traceback import format_exc
 from pydantic import BaseModel, ValidationError
 from pydantic_settings import BaseSettings
 
-class BaseSettings:
+class Settings (BaseSettings):
     OPENAI_APIKEY: str
     OPENAI_MODEL: str
     CHUNKS_PATH: str
+settings = Settings()
 
 from openai import OpenAI
 
