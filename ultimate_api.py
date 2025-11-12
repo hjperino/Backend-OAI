@@ -102,6 +102,14 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
         logger.error(f"OpenAI API ERROR: {repr(e)}\n{format_exc()}")
         return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
 
+def ensure_list(val):
+    """Normalize any value to a list. If None, returns []. If already a list, unchanged. If not a list, makes a single-item list."""
+    if val is None:
+        return []
+    if isinstance(val, list):
+        return val
+    return [val]
+
 def build_upcoming_workshops(chunks: List[dict]):
     today = datetime.now().date()
     upcoming = [
