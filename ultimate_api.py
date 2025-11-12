@@ -291,31 +291,6 @@ def normalize_subject_to_slug(text: str) -> Optional[str]:
         if key in t:
             return slug
     return None
-# Main ask endpoint (example impl)
-@app.post("/ask", response_model=AnswerResponse)
-async def ask(req: QuestionRequest):
-    try:
-        ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
-        q_low = req.question.lower() if req.question else ""
-        
-        # Direct early handling for Impuls-Workshop questions
-        if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            events = fetch_live_impuls_workshops()
-            html = render_workshopstimeline_html(events, title="Kommende Impuls-Workshops")
-            sources = [SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
-            return AnswerResponse(answer=html, sources=sources)
-        
-        # General LLM workflow
-        system_prompt = build_system_prompt()
-        user_prompt = build_user_prompt(req.question, ranked)
-        answer_html = ensure_clickable_links(call_openai(system_prompt, user_prompt, max_tokens=1200))
-        sources = build_sources(ranked, limit=req.max_sources or 4)
-        return AnswerResponse(answer=answer_html, sources=sources)
-    except Exception as e:
-        logger.error("ERROR /ask", exc_info=e)
-        msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
-        return AnswerResponse(answer=msg, sources=[])
-
 
 MONTHS_DE = {
     "januar": 1, "jan": 1,
@@ -888,93 +863,6 @@ def ensure_clickable_links(html_text: str) -> str:
         return f'<a href="{html.escape(u)}" target="_blank">{html.escape(u)}</a>'
     return url_re.sub(repl, html_text)
 
-@app.post("/ask", response_model=AnswerResponse)
-def ask(req: QuestionRequest):
-    try:
-        ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
-        logger.debug(f"ranked types: {[type(x).__name__ for x in ranked[:5]]}")
-        q_low = (req.question or "").lower().strip()
-
-        # Impuls-Workshop logic (always returns on match)
-        if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            qn = q_low.replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
-            live = fetch_live_impuls_workshops() or fallback_events_from_chunks()
-            want_past = any(k in qn for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"])
-            want_next = any(k in qn for k in ["naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes"])
-            yr = None
-            m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
-            if m:
-                try: yr = int(m.group(1))
-                except Exception: yr = None
-
-            norm = []
-            for e in live or []:
-                d = _event_to_date(e)
-                if d:
-                    ee = dict(e)
-                    ee["_d"] = d
-                    norm.append(ee)
-            today = datetime.now(timezone.utc).date()
-            future = [e for e in norm if e.get("_d") and e["_d"] >= today]
-            past = [e for e in norm if e.get("_d") and e["_d"] < today]
-            
-            # Next workshop
-            if want_next:
-                events_to_show = sorted(future, key=lambda x: x["_d"])[:1]
-                html_str = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
-                return AnswerResponse(
-                    answer=html_str,
-                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
-                )
-            # Past workshops, optionally filter by year
-            if want_past:
-                if yr:
-                    past = [e for e in past if e["_d"].year == yr]
-                events_to_show = sorted(past, key=lambda x: x["_d"], reverse=True)
-                html_str = render_workshops_timeline_html(events_to_show, title=f"Vergangene Impuls-Workshops{(' ' + str(yr)) if yr else ''}")
-                return AnswerResponse(
-                    answer=html_str,
-                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
-                )
-            # Default: all future workshops
-            events_to_show = sorted(future, key=lambda x: x["_d"])
-            html_str = render_workshops_timeline_html(events_to_show, title="Kommende Impuls-Workshops")
-            return AnswerResponse(
-                answer=html_str,
-                sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
-            )
-
-        # Innovationsfonds logic (always returns on match)
-        if any(k in q_low for k in [
-            "innovationsfonds", "innovations-projekt", "innovationsprojekte",
-            "projektvorstellungen", "projekte", "innovationsfond projekte", "innovationsfonds projekte"
-        ]):
-            tag_slug = normalize_subject_to_slug(req.question)
-            if tag_slug:
-                tag_url = sitemap_find_innovations_tag(tag_slug)
-                if tag_url:
-                    cards = fetch_live_innovationsfonds_cards(tag_url)
-                    if cards:
-                        html_str = render_innovationsfonds_cards_html(cards, subject_title=tag_slug.capitalize(), tag_url=tag_url)
-                        srcs = [SourceItem(title=f"Innovationsfonds – {tag_slug}", url=tag_url, snippet=f"Projekte mit Tag {tag_slug}")]
-                        if cards and cards[0].get("url"):
-                            srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet", "")))
-                        return AnswerResponse(answer=html_str, sources=srcs)
-        # Default LLM path (always returns)
-        system_prompt = build_system_prompt()
-        user_prompt = build_user_prompt(req.question, ranked)
-        logger.debug(f"LLM call → {settings.openai_model} | prompt_len: {len(user_prompt)}")
-        answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
-        answer_html = ensure_clickable_links(answer_html)
-        sources = build_sources(ranked, limit=req.max_sources or 4)
-        return AnswerResponse(answer=answer_html, sources=sources)
-
-    except Exception as e:
-        logger.error("ERROR /ask: %s\n%s", repr(e), format_exc())
-        msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
-        return AnswerResponse(answer=msg, sources=[])
-
-
 def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
     if not events:
         return (
@@ -1218,6 +1106,93 @@ def load_and_preprocess_data():
         import traceback
         traceback.print_exc()
         return [], {}, {}, {}
+
+
+@app.post("/ask", response_model=AnswerResponse)
+def ask(req: QuestionRequest):
+    try:
+        ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
+        logger.debug(f"ranked types: {[type(x).__name__ for x in ranked[:5]]}")
+        q_low = (req.question or "").lower().strip()
+
+        # Impuls-Workshop logic (always returns on match)
+        if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
+            qn = q_low.replace("ä","ae").replace("ö","oe").replace("ü","ue").replace("ß","ss")
+            live = fetch_live_impuls_workshops() or fallback_events_from_chunks()
+            want_past = any(k in qn for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"])
+            want_next = any(k in qn for k in ["naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes"])
+            yr = None
+            m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
+            if m:
+                try: yr = int(m.group(1))
+                except Exception: yr = None
+
+            norm = []
+            for e in live or []:
+                d = _event_to_date(e)
+                if d:
+                    ee = dict(e)
+                    ee["_d"] = d
+                    norm.append(ee)
+            today = datetime.now(timezone.utc).date()
+            future = [e for e in norm if e.get("_d") and e["_d"] >= today]
+            past = [e for e in norm if e.get("_d") and e["_d"] < today]
+            
+            # Next workshop
+            if want_next:
+                events_to_show = sorted(future, key=lambda x: x["_d"])[:1]
+                html_str = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
+                return AnswerResponse(
+                    answer=html_str,
+                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+                )
+            # Past workshops, optionally filter by year
+            if want_past:
+                if yr:
+                    past = [e for e in past if e["_d"].year == yr]
+                events_to_show = sorted(past, key=lambda x: x["_d"], reverse=True)
+                html_str = render_workshops_timeline_html(events_to_show, title=f"Vergangene Impuls-Workshops{(' ' + str(yr)) if yr else ''}")
+                return AnswerResponse(
+                    answer=html_str,
+                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+                )
+            # Default: all future workshops
+            events_to_show = sorted(future, key=lambda x: x["_d"])
+            html_str = render_workshops_timeline_html(events_to_show, title="Kommende Impuls-Workshops")
+            return AnswerResponse(
+                answer=html_str,
+                sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
+            )
+
+        # Innovationsfonds logic (always returns on match)
+        if any(k in q_low for k in [
+            "innovationsfonds", "innovations-projekt", "innovationsprojekte",
+            "projektvorstellungen", "projekte", "innovationsfond projekte", "innovationsfonds projekte"
+        ]):
+            tag_slug = normalize_subject_to_slug(req.question)
+            if tag_slug:
+                tag_url = sitemap_find_innovations_tag(tag_slug)
+                if tag_url:
+                    cards = fetch_live_innovationsfonds_cards(tag_url)
+                    if cards:
+                        html_str = render_innovationsfonds_cards_html(cards, subject_title=tag_slug.capitalize(), tag_url=tag_url)
+                        srcs = [SourceItem(title=f"Innovationsfonds – {tag_slug}", url=tag_url, snippet=f"Projekte mit Tag {tag_slug}")]
+                        if cards and cards[0].get("url"):
+                            srcs.append(SourceItem(title=cards[0]["title"], url=cards[0]["url"], snippet=cards[0].get("snippet", "")))
+                        return AnswerResponse(answer=html_str, sources=srcs)
+        # Default LLM path (always returns)
+        system_prompt = build_system_prompt()
+        user_prompt = build_user_prompt(req.question, ranked)
+        logger.debug(f"LLM call → {settings.openai_model} | prompt_len: {len(user_prompt)}")
+        answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
+        answer_html = ensure_clickable_links(answer_html)
+        sources = build_sources(ranked, limit=req.max_sources or 4)
+        return AnswerResponse(answer=answer_html, sources=sources)
+
+    except Exception as e:
+        logger.error("ERROR /ask: %s\n%s", repr(e), format_exc())
+        msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
+        return AnswerResponse(answer=msg, sources=[])
 
 # ========== Utility and monitoring endpoints ==========
 
