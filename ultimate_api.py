@@ -41,6 +41,15 @@ class Settings (BaseSettings):
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
 
+class SourceItem(BaseModel):
+    title: str
+    url: str
+    snippet: Optional[str] = None
+
+class AnswerResponse(BaseModel):
+    answer: str
+    sources: List[SourceItem] = []
+
 from openai import OpenAI
 
 CHUNKSPATH = os.getenv("CHUNKSPATH", "processed/processed_chunks.json")
@@ -93,6 +102,28 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
         logger.error(f"OpenAI API ERROR: {repr(e)}\n{format_exc()}")
         return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
 
+def summarize_long_text(text, max_length=180):
+    # If short, just return as is
+    if not text or len(text) < 200:
+        return text
+    prompt = f"Fasse den folgenden Text in zwei Sätzen zusammen:\n{text}"
+    try:
+        response = openai_client.chat.completions.create(
+            model=settings.OPENAI_MODEL,
+            messages=[
+                {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+                {"role": "user", "content": prompt}
+            ],
+            max_completion_tokens=max_length,
+            stream=False
+        )
+        summary = response.choices[0].message.content.strip()
+        return summary
+    except Exception as e:
+        logger.error(f"OpenAI Summarization error: {repr(e)}")
+        return text[:max_length]  # Fallback: truncated text
+
+
 def render_workshops_timeline_html(events, title="Kommende Impuls-Workshops"):
     """Create compact timeline HTML with clickable workshop titles."""
     if not events:
@@ -137,76 +168,30 @@ def ask(req: QuestionRequest):
         q_low = (req.question or "").lower().strip()
 
         # =================== Workshops Branch ===================
-        if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            qn = q_low.replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
-            live = fetch_live_impuls_workshops() or []
-            if not live:
-                live = fallback_events_from_chunks()
-            want_past = any(k in qn for k in [
-                "gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"
-            ])
-            want_next = any(k in qn for k in [
-                "naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes",
-                "nur der naechste", "nur der nächste", "naechstes", "nächstes"
-            ])
-            yr = None
-            m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
-            if m:
-                try:
-                    yr = int(m.group(1))
-                except Exception:
-                    yr = None
+from datetime import datetime
+from typing import List
 
-            norm = []
-            for e in live or []:
-                d = _event_to_date(e)
-                if d:
-                    ee = dict(e)
-                    ee["_d"] = d
-                    norm.append(ee)
-            today = datetime.now(timezone.utc).date()
-            future = [e for e in norm if e.get("_d") and e["_d"] >= today]
-            past = [e for e in norm if e.get("_d") and e["_d"] < today]
-
-            # Next
-            if want_next:
-                events_to_show = sorted(future, key=lambda x: x["_d"])[:1]
-                html_str = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop")
-                if not html_str.strip():
-                    html_str = "<p>Keine passenden Workshops gefunden.</p>"
-                logger.info(f"Returning answer: {repr(html_str)[:400]}")
-                response = AnswerResponse(
-                    answer=html_str,
-                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
-                )
-                return response
-
-            # Past
-            if want_past:
-                if yr:
-                    past = [e for e in past if e["_d"].year == yr]
-                events_to_show = sorted(past, key=lambda x: x["_d"], reverse=True)
-                html_str = render_workshops_timeline_html(events_to_show, title=f"Vergangene Impuls-Workshops{(' ' + str(yr)) if yr else ''}")
-                if not html_str.strip():
-                    html_str = "<p>Keine passenden Workshops gefunden.</p>"
-                logger.info(f"Returning answer: {repr(html_str)[:400]}")
-                response = AnswerResponse(
-                    answer=html_str,
-                    sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
-                )
-                return response
-
-            # Default: all future
-            events_to_show = sorted(future, key=lambda x: x["_d"])
-            html_str = render_workshops_timeline_html(events_to_show, title="Kommende Impuls-Workshops")
-            if not html_str.strip():
-                html_str = "<p>Keine passenden Workshops gefunden.</p>"
-            logger.info(f"Returning answer: {repr(html_str)[:400]}")
-            response = AnswerResponse(
-                answer=html_str,
-                sources=[SourceItem(title="Impuls-Workshop-Übersicht", url="https://dlh.zh.ch/home/impuls-workshops")]
-            )
-            return response
+def build_upcoming_workshops(chunks: List[dict]):
+    today = datetime.now().date()
+    upcoming = [
+        ch for ch in chunks
+        if ch.get('type') == 'workshop' and 'date' in ch and datetime.strptime(ch['date'], "%Y-%m-%d").date() >= today
+    ]
+    if not upcoming:
+        return "Keine Workshops gefunden.", []
+    upcoming = sorted(upcoming, key=lambda x: datetime.strptime(x['date'], "%Y-%m-%d").date())
+    answer_html = "<ul>"
+    sources = []
+    for event in upcoming:
+        date_str = datetime.strptime(event['date'], "%Y-%m-%d").strftime("%d.%m.%Y")
+        answer_html += f"<li>{date_str}: <a href='{event.get('url')}' target='_blank'>{event.get('title', 'Workshop')}</a></li>"
+        sources.append(SourceItem(
+            title=event.get('title', 'Workshop'),
+            url=event.get('url', ''),
+            snippet=event.get('text', '')
+        ))
+    answer_html += "</ul>"
+    return answer_html, sources
 
         # =============== Innovationsfonds Branch ===============
         if any(k in q_low for k in [
@@ -239,8 +224,20 @@ def ask(req: QuestionRequest):
         answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
         answer_html = ensure_clickable_links(answer_html)
         sources = build_sources(ranked, limit=req.max_sources or 4)
-        if not answer_html.strip():
-            answer_html = "<p>Leider konnte keine passende Antwort gefunden werden.</p>"
+        sources = []
+        for ch in ranked[:req.maxsources or 4]:
+            title = ch.get('title', 'Quelle')
+            url = ch.get('url', '')
+            raw_text = ch.get('snippet') or ch.get('text', '')
+            snippet = summarize_long_text(raw_text)
+            sources.append(SourceItem(title=title, url=url, snippet=snippet))
+
+# Compose answer from snippets
+if sources and any(s.snippet for s in sources):
+    answer_html = "<br><br>".join([f"<b>{s.title}</b>: {s.snippet}" for s in sources if s.snippet])
+else:
+    answer_html = "<p>Leider konnte keine passende Antwort gefunden werden.</p>"
+
         logger.info(f"Returning answer: {repr(answer_html)[:400]}")
         response = AnswerResponse(answer=answer_html, sources=sources)
         return response
@@ -544,38 +541,9 @@ def sitemap_find_innovations_tag(tag):
 
 def sitemap_candidates_for_query(q: str, limit: int = 6) -> List[Dict]:
     """Returns prioritized, fake-index hits from the sitemap for relevant sections based on query."""
-    if not SITEMAP_LOADED or not q:
-        return []
-    ql = q.lower()
-    hits = []
-    if any(k in ql for k in ["impuls", "workshop"]):
-        hits = SITEMAP_SECTIONS.get("impuls-workshops", [])
-    elif "innovationsfonds" in ql or "innovations" in ql:
-        hits = SITEMAP_SECTIONS.get("innovationsfonds", [])
-    elif "weiterbildung" in ql:
-        hits = SITEMAP_SECTIONS.get("weiterbildung", [])
-    elif "kuratiert" in ql or "kuratiertes" in ql:
-        hits = SITEMAP_SECTIONS.get("kuratiertes", [])
-    elif "genki" in ql:
-        hits = SITEMAP_SECTIONS.get("genki", [])
-    elif "cops" in ql or "community" in ql:
-        hits = SITEMAP_SECTIONS.get("cops", [])
-    seen = set()
-    out = []
-    for u in hits:
-        if u in seen:
-            continue
-        seen.add(u)
-        title_guess = urllib.parse.urlparse(u).path.rsplit("/", 1)[-1].replace("-", " ").strip().title() or "DLH Seite"
-        out.append({
-            "title": title_guess,
-            "url": u,
-            "snippet": "",
-            "metadata": {"source": u}
-        })
-        if len(out) >= limit:
-            break
-    return out
+   if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
+    answer_html, sources = build_upcoming_workshops(CHUNKS)
+    return AnswerResponse(answer=answer_html, sources=sources)
 
 def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
     """Combines sitemap "boost" candidates with the core search, yielding a sorted hybrid result."""
