@@ -129,9 +129,9 @@ app = FastAPI(title="DLH OpenAI API", version="1.0")
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Adjust to your needs
+    allow_origins=["https://perino.info/dlh-chatbot/"],  # Adjust to your needs
     allow_credentials=False,  # False if allow_origins=["*"]
-    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_methods=["GET", "POST", "OPTIONS", "GET"],
     allow_headers=["*"],
 )
 
