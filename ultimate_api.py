@@ -371,6 +371,14 @@ def filter_chunks_by_section(chunks, section):
 def get_chunks_by_tag(tag):
     return [ch for ch in CHUNKS if tag.lower() in str(ch.get("tags", [])).lower()]
 
+def index_chunks_by_keywords(chunks):
+    keywordindex = {}
+    for i, ch in enumerate(chunks):
+        keywords = ch.get("keywords", [])
+        for kw in keywords:
+            keywordindex.setdefault(kw.lower(), set()).add(i)
+    return keywordindex
+
 KEYWORDINDEX = index_chunks_by_keywords(CHUNKS)
 
 def sort_events_chronologically(chunks, today=None):
