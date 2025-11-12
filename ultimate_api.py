@@ -150,7 +150,24 @@ class QuestionRequest(BaseModel):
     language: Optional[str] = "de"
     max_sources: Optional[int] = 3
 
-# Part 2 of ultimate_api-Kopie.py
+# Root endpoint for basic check
+@app.get("/")
+async def root():
+    return {"message": "DLH Chatbot API is up"}
+
+# Health check endpoint
+@app.get("/health")
+async def health():
+    return {"status": "ok"}
+
+# Main ask endpoint (example impl)
+@app.post("/ask", response_model=AnswerResponse)
+async def ask(req: QuestionRequest):
+    logger.info(f"Received question: {req.question}")
+    # Dummy response for illustration
+    answer = "This is a placeholder answer."
+    sources = [SourceItem(title="Example Source", url="https://dlh.zh.ch/")]
+    return AnswerResponse(answer=answer, sources=sources)
 
 MONTHS_DE = {
     "januar": 1, "jan": 1,
