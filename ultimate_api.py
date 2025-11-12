@@ -46,6 +46,24 @@ openai_client = OpenAI(
 # Load knowledge base chunks, support .json and .jsonl formats
 CHUNKS_PATH = os.getenv("CHUNKS_PATH", "processed/processed_chunks.json")
 
+def call_openai(system_prompt, user_prompt, max_tokens=1200):
+    """
+    Calls the OpenAI API with the specified system and user prompts.
+    Returns the response text.
+    """
+    response = openai_client.chat.completions.create(
+        model=settings.openai_model,
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt}
+        ],
+        max_tokens=max_tokens,
+        temperature=0.3,
+        stream=False,
+    )
+    return response.choices[0].message.content.strip()
+
+
 def load_chunks(path: str):
     """Lädt die Wissensbasis (.json oder .jsonl) sicher und robust."""
     p = Path(path)
