@@ -376,7 +376,7 @@ def build_faq_list_html(subject, max_length=1200):
         arts.append(f"<article><h4><a href='{url}' target='_blank'>{title}</a></h4><p>{snippet}</p></article>")
         if sum(len(a) for a in arts) > max_length:
             break
-    html = "<div class='faq-list'>" + "\n".join(arts) + "</div>" if arts else "<p>Keine FAQs gefunden.</p>"
+    html = "<div class='faq-list'>" + "\n".join(filter(None, ensure_list(arts))) + "</div>" if arts else "<p>Keine FAQs gefunden.</p>"
     logger.info(f"Returning answer: {repr(html)[:400]}")
     return html
 
@@ -477,7 +477,7 @@ def build_faq_list_html(subject, max_length=1200):
         arts.append(f"<article><h4><a href='{url}' target='_blank'>{title}</a></h4><p>{snippet}</p></article>")
         if sum(len(a) for a in arts) > max_length:
             break
-    html = "<div class='faq-list'>" + "\n".join(arts) + "</div>" if arts else "<p>Keine FAQs gefunden.</p>"
+    html = "<div class='faq-list'>" + "\n".join(filter(None, ensure_list(arts))) + "</div>" if arts else "<p>Keine FAQs gefunden.</p>"
     logger.info(f"Returning answer: {repr(html)[:400]}")
     return html
 
@@ -581,7 +581,7 @@ def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
             hh = h[1]
             return hh.get("url") or hh.get("metadata", {}).get("source")
         return None
-    for h in boosted + core:
+    for h in ensure_list(boosted) + ensure_list(core):
         u = key_fn(h)
         if not u or u in seen:
             continue
