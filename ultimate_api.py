@@ -15,19 +15,16 @@ from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
 from pydantic import BaseModel, ValidationError
 
-# Use pydantic_settings for environment variable loading
 from pydantic_settings import BaseSettings
-from collections import defaultdict, Counter 
+from collections import defaultdict, Counter # Hinzugefügt für advanced_search
 
 # --- Configuration (Loaded from Environment/Settings) -----------------------
 
 class Settings(BaseSettings):
-    """
-    Configuration loaded from environment variables (e.g., OPENAI_APIKEY).
-    It defaults chunks_path for robustness.
-    """
+    """Configuration loaded from environment variables (.env file)."""
+    # Die chunks_path muss auf "processed/processed_chunks.json" gesetzt werden.
     openai_apikey: str
-    openai_model: str 
+    openai_model: str
     chunks_path: str = "processed/processed_chunks.json" 
 
 settings = Settings()
@@ -60,7 +57,12 @@ class QuestionRequest(BaseModel):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Datums-Parsing (de) ----------------------------------------------------
+# --- Global Constants -------------------------------------------------------
+
+from openai import OpenAI
+IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops" # Nach oben verschoben
+
+# --- Regex Definitions ----------------------------------
 
 # z.B. "11.11.2025", "11.11.25"
 DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
@@ -79,16 +81,13 @@ MONTHS_DE = {
     "dez": 12, "dezember": 12,
 }
 
-# --- Global Constants & Initialization --------------------------------------
-
-from openai import OpenAI
-IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops" 
+# --- Core Initialization ----------------------------------------------------
 
 openai_client = OpenAI(api_key=settings.openai_apikey)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://perino.info"], # Passen Sie dies für Ihre Domains an
+    allow_origins=["https://perino.info"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -170,7 +169,6 @@ def summarize_long_text(text, max_length=180):
                 {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
                 {"role": "user", "content": prompt}
             ],
-            # Verwenden Sie max_tokens für die Zusammenfassung (oder max_completion_tokens, falls erforderlich)
             max_tokens=max_length,
             stream=False
         )
@@ -406,7 +404,6 @@ def ask(req: QuestionRequest):
     try:
         try:
             # 1. Perform retrieval from chunks regardless of intent
-            # NOTE: get_ranked_with_sitemap currently just calls advanced_search
             ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
         except Exception as e:
             logger.warning(f"Sitemap or advanced search failed: {repr(e)}. Falling back to advanced_search.")
