@@ -19,4 +19,4 @@ pydantic-settings==2.4.0
 # === Utility Libraries ===
 tqdm==4.66.4
 aiofiles==23.2.1
-pip --upgrade pip
+
