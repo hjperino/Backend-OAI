@@ -21,22 +21,17 @@ from collections import defaultdict, Counter
 
 # --- Configuration (Loaded from Environment/Settings) -----------------------
 
-# NOTE: BaseSettings automatically looks for uppercase keys (e.g., OPENAI_APIKEY) 
-# and maps them to snake_case attributes (openai_apikey). 
-# Your CHUNKS_PATH environment variable should map directly to chunks_path.
-
 class Settings(BaseSettings):
     """
     Configuration loaded from environment variables (e.g., OPENAI_APIKEY).
     It defaults chunks_path for robustness.
     """
     openai_apikey: str
-    openai_model: str # Your screenshot shows OPENAI_MODEL: gpt-5
-    chunks_path: str = "processed/processed_chunks.json" # Your screenshot shows CHUNKS_PATH
+    openai_model: str 
+    chunks_path: str = "processed/processed_chunks.json" 
 
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
-# Use the constants defined globally for clarity, though they might be superseded by settings.
 PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 MAX_HITS_IN_PROMPT = 12
 MAX_SNIPPET_CHARS = 800
@@ -118,26 +113,49 @@ def ensure_list(val):
     return [val]
 
 def call_openai(system_prompt, user_prompt, max_tokens=1200):
-    """Calls the OpenAI API with the specified system and user prompts. Returns the response text."""
+    """
+    Calls the OpenAI API. Uses max_completion_tokens for models that require it,
+    falling back to max_tokens for broader compatibility.
+    """
     try:
+        # 1. Attempt using max_completion_tokens (required by 'gpt-5' and some custom models)
         response = openai_client.chat.completions.create(
-            model=settings.openai_model, 
+            model=settings.openai_model,
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_tokens=max_tokens, 
+            max_completion_tokens=max_tokens, 
             stream=False,
         )
-        result = response.choices[0].message.content.strip()
-        logger.info(f"OpenAI returned: {repr(result)[:400]}")
-        if not result.strip():
-            result = "<p>Leider konnte keine Antwort generiert werden.</p>"
-        return result
     except Exception as e:
-        # Improved error logging for the LLM call itself
-        logger.error(f"OpenAI API ERROR: {repr(e)}\n{format_exc()}") 
-        return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
+        # Check for the specific unsupported parameter error (Error code: 400)
+        # Note: In a real-world scenario, checking the error type is essential. 
+        # Here, we perform a safe fallback check.
+        error_msg = str(e)
+        if "max_completion_tokens" in error_msg and "unsupported" in error_msg.lower():
+            logger.warning(f"Model {settings.openai_model} rejected max_completion_tokens. Falling back to max_tokens.")
+            # 2. Fallback to max_tokens (standard for most official OpenAI models like gpt-4/3.5)
+            response = openai_client.chat.completions.create(
+                model=settings.openai_model,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt}
+                ],
+                max_tokens=max_tokens, 
+                stream=False,
+            )
+        else:
+            # Re-raise if it's a different, unrecoverable error
+            logger.error(f"OpenAI API ERROR (unhandled): {repr(e)}\n{format_exc()}")
+            return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
+
+    # Process response
+    result = response.choices[0].message.content.strip()
+    logger.info(f"OpenAI returned: {repr(result)[:400]}")
+    if not result.strip():
+        result = "<p>Leider konnte keine Antwort generiert werden.</p>"
+    return result
 
 
 def summarize_long_text(text, max_length=180):
@@ -158,6 +176,7 @@ def summarize_long_text(text, max_length=180):
         summary = response.choices[0].message.content.strip()
         return summary
     except Exception as e:
+        # Note: Using max_tokens for compatibility here, similar to the main fix logic.
         logger.error(f"OpenAI Summarization error: {repr(e)}")
         return text[:max_length]
 
@@ -407,8 +426,6 @@ def ask(req: QuestionRequest):
         
         # Quellenliste für die AnswerResponse erzeugen
         sources = build_sources(ranked, limit=req.max_sources or 4)
-
-        # WICHTIG: Die fehlerhafte Logik, die die LLM-Antwort überschreibt, ist HIER entfernt.
         
         if not answer_html.strip():
              answer_html = "<p>Leider konnte keine Antwort generiert werden.</p>" # Fallback
@@ -419,7 +436,7 @@ def ask(req: QuestionRequest):
 
     except Exception as e:
         msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
-        logger.error(f"ERROR /ask: %s\n%s", repr(e), format_exc())
+        logger.error(f"ERROR /ask: %s\n{format_exc()}", repr(e))
         logger.info(f"Returning answer: {repr(msg)[:400]}")
         return AnswerResponse(answer=msg, sources=[])
 
@@ -635,8 +652,6 @@ def fetch_live_impuls_workshops() -> List[Dict]:
     Liefert eine Liste von Workshops im Format:
       [{"date": datetime, "title": str, "url": str}, ...]
     Direkt von https://dlh.zh.ch/home/impuls-workshops.
-    
-    NOTE: Adjusted for more robust parsing based on observed structure.
     """
     events: List[Dict] = []
 
