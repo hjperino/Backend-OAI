@@ -17,7 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 # Use pydantic_settings for environment variable loading
 from pydantic_settings import BaseSettings
-from collections import defaultdict, Counter # Hinzugefügt für advanced_search
+from collections import defaultdict, Counter 
 
 # --- Configuration (Loaded from Environment/Settings) -----------------------
 
@@ -300,8 +300,8 @@ def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[da
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
-        # 1. Perform retrieval from chunks regardless of intent
         try:
+            # 1. Perform retrieval from chunks regardless of intent
             ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
         except Exception as e:
             logger.warning(f"Sitemap or advanced search failed: {repr(e)}. Falling back to advanced_search.")
@@ -330,24 +330,33 @@ def ask(req: QuestionRequest):
             # --- CHUNK ANALYSIS (Step 1 & 2: Prioritize Chunks) ---
             chunk_events = []
             for ch in ranked:
-                # Extract date from chunk metadata/data (metadata is more reliable for events)
-                d_meta = ch.get('metadata', {}).get('dates', [None])
-                d_str = d_meta[0] if d_meta else None
-                u = ch.get('url', ch.get('metadata', {}).get('source', ''))
-
-                dt_obj = parse_de_date(d_str) if d_str else None
+                # Extract event data from chunk if it looks like an event
+                # We prioritize chunks where the URL/title suggests an event page or the term "Impuls-Workshop"
                 
-                # Simple filter: must have a date and be related to events/workshops
-                # We check for a date AND high relevance from the search, or an explicit URL match.
-                is_relevant_event = dt_obj and any(k in u.lower() for k in ["impuls-workshops", "termine", "events"])
+                u = ch.get('url', ch.get('metadata', {}).get('source', ''))
+                
+                # Check for relevance: must have a date and be related to workshops/events
+                is_relevant_event = any(k in u.lower() for k in ["impuls-workshops", "termine", "events", "aktuell"])
                 
                 if is_relevant_event:
-                    chunk_events.append({
-                        "date": dt_obj, 
-                        "title": ch.get("title", "(Ohne Titel)"), 
-                        "url": u, 
-                        "_d": dt_obj # Normalized datetime object for sorting/filtering
-                    })
+                    # Chunks can contain multiple dates/events in metadata. Try to extract all relevant events.
+                    # Simplified extraction: take the chunk's primary metadata date as the event date
+                    d_meta = ch.get('metadata', {}).get('dates', [None])
+                    d_str = d_meta[0] if d_meta else None
+                    
+                    dt_obj = parse_de_date(d_str) if d_str else None
+                    
+                    if dt_obj:
+                         # Append the chunk itself as a single event item (we rely on the logic below to filter/sort)
+                        chunk_events.append({
+                            "date": dt_obj, 
+                            "title": ch.get("title", "(Ohne Titel)") + " (Chunk)", 
+                            "url": u, 
+                            "_d": dt_obj # Normalized datetime object for sorting/filtering
+                        })
+                    
+                    # NOTE: A more complex solution would be needed here to parse multi-event list pages inside a single chunk.
+                    # For now, we rely on the overall relevance of the chunk's page date.
 
             # 3. If relevant events found in chunks, proceed with chunk-based filtering/rendering
             if chunk_events:
@@ -930,11 +939,3 @@ if __name__ == "__main__":
     import uvicorn
     # uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
     pass
-"""
-
-# Write the corrected code to a new file
-file_name = "ultimate_api_corrected.py"
-with open(file_name, "w") as f:
-    f.write(corrected_code)
-
-print(f"The corrected code has been saved to {file_name}")<ctrl46>}
