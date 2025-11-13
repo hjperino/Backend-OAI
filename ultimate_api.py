@@ -81,6 +81,17 @@ class QuestionRequest(BaseModel):
     language: Optional[str] = "de"
     max_sources: Optional[int] = 3
 
+def ensure_list(val):
+    """Convert None to [], lists unchanged, single values/objects to [value], and AnswerResponse to list of its .sources."""
+    if val is None:
+        return []
+    # Special handling for AnswerResponse: extract .sources if present
+    if hasattr(val, "sources"):
+        return ensure_list(val.sources)
+    if isinstance(val, list):
+        return val
+    return [val]
+
 def call_openai(system_prompt, user_prompt, max_tokens=1200):
     """Calls the OpenAI API with the specified system and user prompts. Returns the response text."""
     try:
@@ -101,17 +112,6 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
     except Exception as e:
         logger.error(f"OpenAI API ERROR: {repr(e)}\n{format_exc()}")
         return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
-
-def ensure_list(val):
-    """Convert None to [], lists unchanged, single values/objects to [value], and AnswerResponse to list of its .sources."""
-    if val is None:
-        return []
-    # Special handling for AnswerResponse: extract .sources if present
-    if hasattr(val, "sources"):
-        return ensure_list(val.sources)
-    if isinstance(val, list):
-        return val
-    return [val]
 
 def build_upcoming_workshops(chunks: List[dict]):
     today = datetime.now().date()
