@@ -14,20 +14,30 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from traceback import format_exc
 from pydantic import BaseModel, ValidationError
-# from pydantic import BaseModel # Duplicate import removed
 
+# Use pydantic_settings for environment variable loading
 from pydantic_settings import BaseSettings
-from collections import defaultdict, Counter # Added defaultdict and Counter
+from collections import defaultdict, Counter 
+
+# --- Configuration (Loaded from Environment/Settings) -----------------------
+
+# NOTE: BaseSettings automatically looks for uppercase keys (e.g., OPENAI_APIKEY) 
+# and maps them to snake_case attributes (openai_apikey). 
+# Your CHUNKS_PATH environment variable should map directly to chunks_path.
 
 class Settings(BaseSettings):
-    """Configuration loaded from environment variables (.env file)."""
+    """
+    Configuration loaded from environment variables (e.g., OPENAI_APIKEY).
+    It defaults chunks_path for robustness.
+    """
     openai_apikey: str
-    openai_model: str
-    chunks_path: str = "processed/processed_chunks.json" # Default added for robustness
+    openai_model: str # Your screenshot shows OPENAI_MODEL: gpt-5
+    chunks_path: str = "processed/processed_chunks.json" # Your screenshot shows CHUNKS_PATH
 
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
-PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000")) # Consistent variable name
+# Use the constants defined globally for clarity, though they might be superseded by settings.
+PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 MAX_HITS_IN_PROMPT = 12
 MAX_SNIPPET_CHARS = 800
 
@@ -37,7 +47,7 @@ class SourceItem(BaseModel):
     """Model for a single content source."""
     title: str
     url: str
-    snippet: Optional[str] = None # Keeping the simpler, final model
+    snippet: Optional[str] = None 
 
 class AnswerResponse(BaseModel):
     """Model for the final API response."""
@@ -55,7 +65,12 @@ class QuestionRequest(BaseModel):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Datums-Parsing (de) ----------------------------------------------------
+# --- Global Constants -------------------------------------------------------
+
+from openai import OpenAI
+IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops" 
+
+# --- Regex Definitions ------------------------------------------------------
 
 # z.B. "11.11.2025", "11.11.25"
 DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
@@ -67,38 +82,27 @@ DMY_TEXT_RE = re.compile(
 TIME_RE = re.compile(r"\b(\d{1,2})[:.](\d{2})\b")
 
 MONTHS_DE = {
-    "jan": 1, "januar": 1,
-    "feb": 2, "februar": 2,
-    "mär": 3, "maerz": 3, "märz": 3,
-    "mar": 3,  # falls ohne Umlaut
-    "apr": 4, "april": 4,
-    "mai": 5,
-    "jun": 6, "juni": 6,
-    "jul": 7, "juli": 7,
-    "aug": 8, "august": 8,
-    "sep": 9, "sept": 9, "september": 9,
-    "okt": 10, "oktober": 10,
-    "nov": 11, "november": 11,
+    "jan": 1, "januar": 1, "feb": 2, "februar": 2, "mär": 3, "maerz": 3, 
+    "märz": 3, "mar": 3, "apr": 4, "april": 4, "mai": 5, "jun": 6, "juni": 6,
+    "jul": 7, "juli": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9, 
+    "september": 9, "okt": 10, "oktober": 10, "nov": 11, "november": 11,
     "dez": 12, "dezember": 12,
 }
 
-# --- Global Constants & Initialization --------------------------------------
-
-from openai import OpenAI
-IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops" # Moved definition up
+# --- Core Initialization ----------------------------------------------------
 
 openai_client = OpenAI(api_key=settings.openai_apikey)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://perino.info"],  # Adjust this for your deployments
+    allow_origins=["https://perino.info"],
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
 
-# --- Helper Functions (Utility) ---------------------------------------------
+# --- Utility Functions ------------------------------------------------------
 
 def safe_add_lists(a, b):
     return ensure_list(a) + ensure_list(b)
@@ -107,7 +111,6 @@ def ensure_list(val):
     """Convert None to [], lists unchanged, single values/objects to [value], and AnswerResponse to list of its .sources."""
     if val is None:
         return []
-    # Special handling for AnswerResponse: extract .sources if present
     if hasattr(val, "sources"):
         return ensure_list(val.sources)
     if isinstance(val, list):
@@ -118,12 +121,12 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
     """Calls the OpenAI API with the specified system and user prompts. Returns the response text."""
     try:
         response = openai_client.chat.completions.create(
-            model=settings.openai_model, # Fixed variable name
+            model=settings.openai_model, 
             messages=[
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_prompt}
             ],
-            max_completion_tokens=max_tokens,
+            max_tokens=max_tokens, 
             stream=False,
         )
         result = response.choices[0].message.content.strip()
@@ -132,7 +135,8 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
             result = "<p>Leider konnte keine Antwort generiert werden.</p>"
         return result
     except Exception as e:
-        logger.error(f"OpenAI API ERROR: {repr(e)}\n{format_exc()}")
+        # Improved error logging for the LLM call itself
+        logger.error(f"OpenAI API ERROR: {repr(e)}\n{format_exc()}") 
         return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
 
 
@@ -143,35 +147,19 @@ def summarize_long_text(text, max_length=180):
     prompt = f"Fasse den folgenden Text in zwei Sätzen zusammen:\n{text}"
     try:
         response = openai_client.chat.completions.create(
-            model=settings.openai_model, # Fixed variable name
+            model=settings.openai_model,
             messages=[
                 {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
                 {"role": "user", "content": prompt}
             ],
-            max_completion_tokens=max_length,
+            max_tokens=max_length,
             stream=False
         )
         summary = response.choices[0].message.content.strip()
         return summary
     except Exception as e:
         logger.error(f"OpenAI Summarization error: {repr(e)}")
-        return text[:max_length]  # Fallback: truncated text
-
-
-def _event_to_date(e: Dict) -> Optional[datetime]:
-    """
-    Hilfsfunktion für die Workshop-Intentlogik:
-    nimmt ein Event-Dict und liefert ein datetime-Objekt.
-    """
-    if not isinstance(e, dict):
-        return None
-
-    d = e.get("date")
-    if isinstance(d, datetime):
-        return d
-
-    txt = e.get("when") or e.get("title") or ""
-    return parse_de_date(txt)
+        return text[:max_length]
 
 def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
     """
@@ -180,7 +168,7 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
     if not events:
         html_str = (
             "<section class='dlh-answer'>"
-            f"<p>Keine Workshops gefunden.</p>"
+            "<p>Keine Workshops gefunden.</p>"
             "<h3>Quellen</h3>"
             "<ul class='sources'>"
             f"<li><a href='{IMPULS_URL}' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
@@ -214,14 +202,93 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
     logger.info(f"Returning answer: {repr(html_str)[:400]}")
     return html_str
 
-# --- Main API Endpoint ---
+def _event_to_date(e: Dict) -> Optional[datetime]:
+    """
+    Hilfsfunktion für die Workshop-Intentlogik:
+    nimmt ein Event-Dict und liefert ein datetime-Objekt.
+    """
+    if not isinstance(e, dict):
+        return None
+
+    d = e.get("date")
+    if isinstance(d, datetime):
+        return d
+
+    txt = e.get("when") or e.get("title") or ""
+    return parse_de_date(txt)
+
+def coerce_year(y, refyear):
+    if not y:
+        return refyear
+    y = y.strip()
+    if len(y) == 2:
+        y = "20" + y
+    try:
+        return int(y)
+    except Exception:
+        return refyear
+
+def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[datetime]:
+    """Versucht ein Datum (und ggf. Uhrzeit) aus deutschem Text zu extrahieren."""
+    if not text:
+        return None
+    t = text.strip()
+    rd = ref_date or datetime.now(timezone.utc)
+    ref_year = rd.year
+
+    # 1) 11.11.2025
+    m = DMY_DOTTED_RE.search(t)
+    hh, mm = None, None
+    tm = TIME_RE.search(t)
+    if tm:
+        hh, mm = int(tm.group(1)), int(tm.group(2))
+    if m:
+        d = int(m.group(1))
+        mth = int(m.group(2))
+        y = coerce_year(m.group(3), ref_year)
+        try:
+            base = datetime(y, mth, d, tzinfo=timezone.utc)
+            if hh is not None:
+                base = base.replace(hour=hh, minute=mm or 0)
+            return base
+        except Exception:
+            pass
+
+    # 2) 25. Nov 2025 / 25. November (Jahr optional)
+    m = DMY_TEXT_RE.search(t)
+    if m:
+        d = int(m.group(1))
+        month_word = (m.group(2) or "").strip().lower()
+        # Umlaute vereinheitlichen
+        month_word = (month_word
+                      .replace("ä", "ae")
+                      .replace("ö", "oe")
+                      .replace("ü", "ue"))
+        mth = MONTHS_DE.get(month_word)
+        y = coerce_year(m.group(3), ref_year)
+        if mth:
+            try:
+                base = datetime(y, mth, d, tzinfo=timezone.utc)
+                if hh is not None:
+                    base = base.replace(hour=hh, minute=mm or 0)
+                return base
+            except Exception:
+                pass
+
+    return None
+
+# --- Main API Endpoint ------------------------------------------------------
 
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
-        # Use get_ranked_with_sitemap (which calls advanced_search)
-        ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
-        print("Y  ranked types:", [type(x).__name__ for x in ranked[:5]])
+        try:
+            ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
+        except Exception as e:
+            logger.warning(f"Sitemap or basic search failed: {repr(e)}. Falling back to advanced_search.")
+            ranked = advanced_search(req.question, max_items=req.max_sources or 12)
+        
+        print("Y ranked types:", [type(x).__name__ for x in ranked[:5]])
 
         # ---- Workshop-Sonderfall (Impuls-Workshops) ------------------------
         q_low = (req.question or "").lower()
@@ -244,30 +311,13 @@ def ask(req: QuestionRequest):
             want_past = any(
                 k in qn
                 for k in [
-                    "gab es",
-                    "waren",
-                    "vergangenen",
-                    "bisherigen",
-                    "im jahr",
-                    "letzten",
-                    "fruehere",
-                    "frühere",
-                    "bisher",
+                    "gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher",
                 ]
             )
             want_next = any(
                 k in qn
                 for k in [
-                    "naechste",
-                    "nächste",
-                    "der naechste",
-                    "der nächste",
-                    "als naechstes",
-                    "als nächstes",
-                    "nur der naechste",
-                    "nur der nächste",
-                    "naechstes",
-                    "nächstes",
+                    "naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes",
                 ]
             )
 
@@ -354,40 +404,26 @@ def ask(req: QuestionRequest):
         user_prompt = build_user_prompt(req.question, ranked)
         answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
         answer_html = ensure_clickable_links(answer_html)
-
+        
+        # Quellenliste für die AnswerResponse erzeugen
         sources = build_sources(ranked, limit=req.max_sources or 4)
 
-        # This block was flawed. It attempts to *overwrite* the LLM answer
-        # with just a list of snippets, and also re-defines sources=[]
-        # I'm keeping the original intent (to use LLM for the answer) and
-        # ensuring the sources are properly built.
+        # WICHTIG: Die fehlerhafte Logik, die die LLM-Antwort überschreibt, ist HIER entfernt.
         
-        # Original (flawed) code:
-        # sources = [] # Redundant assignment removed
-        # for ch in ranked[:req.max_sources or 4]:
-        #     title = ch.get('title', 'Quelle')
-        #     url = ch.get('url', '')
-        #     raw_text = ch.get('snippet') or ch.get('text', '')
-        #     snippet = summarize_long_text(raw_text)
-        #     sources.append(SourceItem(title=title, url=url, snippet=snippet))
-        # print("Sources right before answer:", sources)
-        # sources = []  # define your sources list # Redundant assignment removed
-        # if sources and any(s.snippet for s in sources):
-        #     answer_html = "<br><br>".join([f"<b>{s.title}</b>: {s.snippet}" for s in sources if s.snippet])
-        # else:
-        #     answer_html = "<p>Leider konnte keine passende Antwort gefunden werden.</p>"
-
+        if not answer_html.strip():
+             answer_html = "<p>Leider konnte keine Antwort generiert werden.</p>" # Fallback
+             
         logger.info(f"Returning answer: {repr(answer_html)[:400]}")
         response = AnswerResponse(answer=answer_html, sources=sources)
         return response
 
     except Exception as e:
         msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
-        logger.error("ERROR /ask: %s\n%s", repr(e), format_exc())
+        logger.error(f"ERROR /ask: %s\n%s", repr(e), format_exc())
         logger.info(f"Returning answer: {repr(msg)[:400]}")
         return AnswerResponse(answer=msg, sources=[])
 
-# --- Load knowledge chunks (support .json and .jsonl) ---
+# --- Knowledge Base Loading and Indexing ------------------------------------
 
 def load_chunks(path: str) -> List[Dict]:
     """Load the knowledge base .json or .jsonl robustly."""
@@ -413,12 +449,10 @@ def load_chunks(path: str) -> List[Dict]:
             return json.load(p.open("r", encoding="utf-8"))
         except Exception as e:
             logger.error(f"Failed to load chunks from {path}: {e}")
-            return [] # Changed return response to return []
-
-# --- Knowledge Base Loading and Indexing ------------------------------------
+            return []
 
 # Load chunks immediately after settings and utility functions
-CHUNKS: list[dict] = load_chunks(CHUNKS_PATH)
+CHUNKS: List[Dict] = load_chunks(CHUNKS_PATH)
 CHUNKS_COUNT = len(CHUNKS)
 logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
 
@@ -434,14 +468,12 @@ def index_chunks_by_subject(chunks):
 
 SUBJECTINDEX = index_chunks_by_subject(CHUNKS)
 
-# Missing function needed for advanced_search
 def extract_terms(query: str) -> Set[str]:
     """Simple term extraction for keyword indexing."""
     query = query.lower()
     # Simple tokenization: split by non-alphanumeric, filter short/common words
     tokens = re.split(r"[^a-zäöüß0-9]+", query)
     return {t for t in tokens if len(t) > 2 and t not in ["der", "die", "das", "und", "oder"]}
-
 
 def filter_chunks_by_section(chunks, section):
     """Return all chunks with given section label."""
@@ -495,7 +527,6 @@ def advanced_search(query, max_items=12):
     results = [CHUNKS[idx] for idx in best_idxs]
     logger.info(f"Advanced search for '{query}': {len(results)} hits")
     return results
-
 
 # --- Sitemap handling -------------------------------------------------------
 
@@ -562,21 +593,11 @@ def sitemap_find_innovations_tag(tag: str) -> Optional[str]:
     for url in SITEMAP_SECTIONS.get("innovationsfonds", []):
         if tag in url:
             return url
-    
-    # Original fallback logic was unreachable due to immediate return.
-    # Leaving the defined function as-is, which relies only on SITEMAP_SECTIONS.
     return None
 
 def sitemap_candidates_for_query(q: str, limit: int = 6) -> List[Dict]:
-    """Returns prioritized, fake-index hits from the sitemap for relevant sections based on query."""
-    
-    # Removed the redundant workshop check here, as it's handled in `ask`
-    # The block below was removed as it called an undefined function:
-    # if any(k in q.lower() for k in ["impuls", "workshop", "workshops"]):
-    #     answer_html, sources = build_upcoming_workshops(CHUNKS) 
-    #     return AnswerResponse(answer=answer_html, sources=sources)
-
-    return [] # Placeholder: Needs implementation to return relevant candidates from SITEMAP_SECTIONS
+    """Returns prioritized, fake-index hits from the sitemap for relevant sections based on query. (Placeholder logic)"""
+    return []
 
 def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
     """Combines sitemap "boost" candidates with the core search, yielding a sorted hybrid result."""
@@ -607,93 +628,15 @@ def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
             break
     return merged
 
-def coerce_year(y, refyear):
-    if not y:
-        return refyear
-    y = y.strip()
-    if len(y) == 2:
-        y = "20" + y
-    try:
-        return int(y)
-    except Exception:
-        return refyear
-
-def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[datetime]:
-    """
-    Versucht ein Datum (und ggf. Uhrzeit) aus deutschem Text zu extrahieren.
-    """
-    if not text:
-        return None
-    t = text.strip()
-    rd = ref_date or datetime.now(timezone.utc)
-    ref_year = rd.year
-
-    # 1) 11.11.2025
-    m = DMY_DOTTED_RE.search(t)
-    hh, mm = None, None
-    tm = TIME_RE.search(t)
-    if tm:
-        hh, mm = int(tm.group(1)), int(tm.group(2))
-    if m:
-        d = int(m.group(1))
-        mth = int(m.group(2))
-        y = coerce_year(m.group(3), ref_year) # Fixed typo: _coerce_year -> coerce_year
-        try:
-            base = datetime(y, mth, d, tzinfo=timezone.utc)
-            if hh is not None:
-                base = base.replace(hour=hh, minute=mm or 0)
-            return base
-        except Exception:
-            pass
-
-    # 2) 25. Nov 2025 / 25. November (Jahr optional)
-    m = DMY_TEXT_RE.search(t)
-    if m:
-        d = int(m.group(1))
-        month_word = (m.group(2) or "").strip().lower()
-        # Umlaute vereinheitlichen
-        month_word = (month_word
-                      .replace("ä", "ae")
-                      .replace("ö", "oe")
-                      .replace("ü", "ue"))
-        mth = MONTHS_DE.get(month_word)
-        y = coerce_year(m.group(3), ref_year) # Fixed typo: _coerce_year -> coerce_year
-        if mth:
-            try:
-                base = datetime(y, mth, d, tzinfo=timezone.utc)
-                if hh is not None:
-                    base = base.replace(hour=hh, minute=mm or 0)
-                return base
-            except Exception:
-                pass
-
-    return None
-
-SUBJECT_SLUGS = {
-    "chemie": "chemie",
-    "physik": "physik",
-    "biologie": "biologie",
-    "mathematik": "mathematik",
-    "informatik": "informatik",
-    "deutsch": "deutsch",
-    "englisch": "englisch",
-    "franzoesisch": "franzoesisch",  # nur diese Schreibweise
-    "italienisch": "italienisch",
-    "spanisch": "spanisch",
-    "geschichte": "geschichte",
-    "geografie": "geografie",
-    "wirtschaft": "wirtschaft",
-    "recht": "recht",
-    "philosophie": "philosophie",
-}
-
-# --- Live: Impuls-Workshops robust parsen ------------------------------------
+# --- Live Web Scraping ------------------------------------------------------
 
 def fetch_live_impuls_workshops() -> List[Dict]:
     """
     Liefert eine Liste von Workshops im Format:
       [{"date": datetime, "title": str, "url": str}, ...]
     Direkt von https://dlh.zh.ch/home/impuls-workshops.
+    
+    NOTE: Adjusted for more robust parsing based on observed structure.
     """
     events: List[Dict] = []
 
@@ -710,34 +653,44 @@ def fetch_live_impuls_workshops() -> List[Dict]:
         return []
 
     try:
-        # robust: nutze html.parser, damit wir kein lxml brauchen
         soup = BeautifulSoup(html, "html.parser")
 
-        # offensichtlichen Müll entfernen
+        # Offensichtlichen Müll entfernen
         for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner"]:
             for el in soup.select(sel):
                 el.decompose()
 
         root = soup.select_one("main") or soup
-
-        # 1) Generisch: alle <li> mit <time> im main-Bereich
-        for li in root.select("ol li, ul li"):
-            txt = li.get_text(" ", strip=True)
-            if not txt:
-                continue
-
-            time_el = li.find("time")
-            date_str = time_el.get_text(" ", strip=True) if time_el else txt
+        
+        # Targetting the common structure: an <a> tag that contains a time and title, often in a list
+        for a in root.select("li a[href], div a[href]"):
+            # Try to extract elements relative to the link
+            parent = a.find_parent(["li", "div"])
+            
+            # Extract date string
+            date_str = ""
+            time_el = a.find_previous_sibling("time") or parent.find("time")
+            if time_el:
+                date_str = time_el.get_text(" ", strip=True)
+            
+            # Fallback: Check if date/time info is in the surrounding text (like the provided screenshot)
+            if not date_str and parent:
+                # Check for sibling elements that might contain the date
+                date_candidates = parent.select("span.date, div.date, time") 
+                date_str = " ".join([d.get_text(" ", strip=True) for d in date_candidates])
+            
+            # If no date found yet, try the main link text (less reliable)
+            if not date_str:
+                date_str = parent.get_text(" ", strip=True)
+                
             dt = parse_de_date(date_str)
-
-            a = li.find("a")
-            title = a.get_text(" ", strip=True) if a else txt
+            title = a.get_text(" ", strip=True) if a else ""
             href = a.get("href") if a and a.has_attr("href") else ""
 
             if href and href.startswith("/"):
                 href = urllib.parse.urljoin(IMPULS_URL, href)
 
-            if dt and title:
+            if dt and title and href:
                 events.append(
                     {
                         "date": dt,
@@ -745,38 +698,7 @@ def fetch_live_impuls_workshops() -> List[Dict]:
                         "url": href or IMPULS_URL,
                     }
                 )
-
-        # 2) Fallback: Abschnitt mit einer Überschrift, in der "Impuls" oder "Workshops" vorkommt
-        if not events:
-            h_candidates = [
-                h
-                for h in root.select("h2, h3")
-                if "impuls" in h.get_text(" ", strip=True).lower()
-                or "workshop" in h.get_text(" ", strip=True).lower()
-            ]
-            for h in h_candidates:
-                sec = h.find_next(["ol", "ul", "section", "div"]) or root
-                for li in sec.select("li"):
-                    txt = li.get_text(" ", strip=True)
-                    if not txt:
-                        continue
-
-                    dt = parse_de_date(txt)
-                    a = li.find("a")
-                    title = a.get_text(" ", strip=True) if a else txt
-                    href = a.get("href") if a and a.has_attr("href") else ""
-                    if href and href.startswith("/"):
-                        href = urllib.parse.urljoin(IMPULS_URL, href)
-
-                    if dt and title:
-                        events.append(
-                            {
-                                "date": dt,
-                                "title": title,
-                                "url": href or IMPULS_URL,
-                            }
-                        )
-
+        
         # Doppelte raus
         seen = set()
         cleaned: List[Dict] = []
@@ -807,58 +729,71 @@ def truncates(s, n):
     s = s or ""
     return s if len(s) <= n else s[:max(0, n - 1)]
 
-def safe_snippet(snippet, max_len=MAX_SNIPPET_CHARS): # Changed constant name
+def safe_snippet(snippet, max_len=MAX_SNIPPET_CHARS):
     return snippet if len(snippet) <= max_len else snippet[:max(0, max_len-1)]
 
-def build_system_prompt() -> str: # Consolidated duplicate definitions
+def build_system_prompt() -> str:
+    # Consolidated and improved system prompt
     return (
-        "Du bist ein kompetenter KI-Chatbot, der Fragen rund um die DLH-Webseite dlz.zh.ch, Impuls-Workshops, Innovationsfonds-Projekte, Weiterbildungen und verwandte Bildungsthemen beantwortet. Du gibst immer eine Antwort."
-        "Nenne bei Terminen Datum und Zeit sowie einen verlinkten Titel. "
-        "Bei Projekten im Innovationsfonds liste die Titel jeweils als klickbare Links. "
-        "Wenn es sich um Termine/Workshops handelt, nutze folgendes HTML-Muster:\n\n"
-        "Kurz-Einleitung (1 Satz).\n"
+        "Du bist ein kompetenter KI-Chatbot, der Fragen rund um die DLH-Webseite dlz.zh.ch, Impuls-Workshops, Innovationsfonds-Projekte, Weiterbildungen und verwandte Bildungsthemen beantwortet. "
+        "Antworte **prägnant und auf Deutsch**. Nutze den bereitgestellten **Kontext** (Chunks) als primäre Wissensbasis. "
+        "Wenn du eine Antwort aus dem Kontext generierst, **nimm Bezug auf die Quellen**. "
+        "Formatiere Antworten zu Listen von Terminen/Workshops oder Projekten unter Verwendung der folgenden HTML-Muster:\n\n"
+        "<section class='dlh-answer'>\n"
+        "<p>Deine kurze Einleitung (1-2 Sätze, falls nötig).</p>\n"
+        "Wenn du Listen erzeugst, verwende:\n"
         "<ol class='timeline'>\n"
         "<li><time>2025-11-11</time> <a href='URL' target='_blank'>Titel des Workshops</a>"
         "<div class='meta'>Ort/Format (falls bekannt)</div></li>\n"
         "</ol>\n"
-        "<h3>Quellen</h3>\n"
-        "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
-        "\n"
-        "Bei Projektlisten nutze Karten:\n\n"
+        "Wenn du Projekte/Artikel listest, verwende:\n"
         "<div class='cards'>\n"
         "<article class='card'>\n"
         "<h4><a href='URL' target='_blank'>Projekttitel</a></h4>\n"
         "<p>Kurze Beschreibung (1–2 Sätze).</p>\n"
         "</article>\n"
         "</div>\n"
+        "Schließe deine Antwort immer mit einem <h3>Quellen</h3> Block, in dem du alle verwendeten URLs aus dem Kontext auflistest, selbst wenn sie bereits in der Liste/den Karten enthalten sind:\n"
         "<h3>Quellen</h3>\n"
         "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
+        "</section>"
     )
 
 def build_user_prompt(query: str, ranked: List[Dict]) -> str:
-    """Builds user prompt including context from search results."""
+    """
+    Builds user prompt including context from search results.
+    Prioritizes 'content' over 'snippet' for rich context.
+    """
     source_snips = []
-    # Max items logic is handled by the caller (get_ranked_with_sitemap)
     for ch in ranked:
-        snippet = ch.get("snippet", "")
+        # Prioritize rich 'content' but fallback to 'snippet'
+        raw_text = ch.get("content") or ch.get("snippet") or "" 
+        
+        # Apply truncation to keep prompt size manageable
+        snippet = safe_snippet(raw_text, MAX_SNIPPET_CHARS) 
+        
         url = ch.get("url", "")
+        title = ch.get("title", "Quelle") 
+        
         if snippet:
-            source_snips.append(f"Quelle: {url}\n{snippet}")
+            source_snips.append(f"Quelle: {title} ({url})\n{snippet}")
+            
     context = "\n".join(source_snips)
-    return f"{query.strip()}\nKontext:\n{context}" if context else query.strip()
+    # The final prompt should clearly state the user's question and provide the context.
+    return f"Frage: {query.strip()}\nKontext zur Beantwortung:\n{context}" if context else query.strip()
 
 def build_sources(ranked: List[Dict], limit: int = 4) -> List[SourceItem]:
     """Extracts and formats sources for AnswerResponse."""
     out = []
     for ch in ranked[:limit]:
         # Summarization done here to get the snippet for the SourceItem model
-        raw_text = ch.get('snippet') or ch.get('text', '')
+        raw_text = ch.get('snippet') or ch.get('content', '')
         snippet = summarize_long_text(raw_text)
         out.append(
             SourceItem(
                 title=ch.get("title", "(Quelle)"),
                 url=ch.get("url", ""),
-                snippet=snippet # Use the summarized snippet
+                snippet=snippet
             )
         )
     return out
@@ -868,6 +803,7 @@ def ensure_clickable_links(answer_html: str) -> str:
     """Ensure all links in LLM output are clickable (basic HTML patch, expand as needed)."""
     if not answer_html:
         return ""
+    # This regex is meant to turn bare URLs into clickable links.
     return re.sub(
         r'\b(https?://[a-zA-Z0-9_\-./?=#%&]+)\b',
         r'<a href="\1" target="_blank">\1</a>',
@@ -967,16 +903,15 @@ def debug_deps():
     import platform
     import openai as _openai_pkg
     import bs4 as _bs4_pkg
-    # import lxml as _lxml_pkg # Removed lxml as it may not be installed
     versions = {
         "python": platform.python_version(),
         "openai": getattr(_openai_pkg, "__version__", "?"),
         "bs4": getattr(_bs4_pkg, "__version__", "?"),
-        # "lxml": getattr(_lxml_pkg, "__version__", "?"), # Removed lxml entry
     }
     logger.info(f"Dependency versions: {versions}")
     return versions
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
+    # uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
+    pass
