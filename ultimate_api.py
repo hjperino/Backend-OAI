@@ -58,9 +58,6 @@ MAXSNIPPETCHARS = 800
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-print("CHUNKS loaded:", len(CHUNKS))
-print("First 2 chunks:", CHUNKS[:2])
-
 # --- Config and Initialization ---
 from openai import OpenAI
 
