@@ -60,12 +60,7 @@ class QuestionRequest(BaseModel):
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# --- Global Constants -------------------------------------------------------
-
-from openai import OpenAI
-IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops" 
-
-# --- Regex Definitions ------------------------------------------------------
+# --- Datums-Parsing (de) ----------------------------------------------------
 
 # z.B. "11.11.2025", "11.11.25"
 DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
@@ -84,7 +79,10 @@ MONTHS_DE = {
     "dez": 12, "dezember": 12,
 }
 
-# --- Core Initialization ----------------------------------------------------
+# --- Global Constants & Initialization --------------------------------------
+
+from openai import OpenAI
+IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops" 
 
 openai_client = OpenAI(api_key=settings.openai_apikey)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
@@ -302,52 +300,87 @@ def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[da
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
+        # 1. Perform retrieval from chunks regardless of intent
         try:
             ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
         except Exception as e:
-            logger.warning(f"Sitemap or basic search failed: {repr(e)}. Falling back to advanced_search.")
+            logger.warning(f"Sitemap or advanced search failed: {repr(e)}. Falling back to advanced_search.")
             ranked = advanced_search(req.question, max_items=req.max_sources or 12)
         
         print("Y ranked types:", [type(x).__name__ for x in ranked[:5]])
 
-        # ---- Workshop-Sonderfall (Impuls-Workshops) ------------------------
+        # ---- Workshop-Sonderfall (Impuls-Workshops) - CHUNK PRIORITIZATION ---
         q_low = (req.question or "").lower()
 
         if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            print("Y Workshops: entered branch")
+            print("Y Workshops: entered prioritization branch")
 
-            # Intent: Vergangenheit / nächster / Jahr
+            # Intent checking functions (re-defined locally as they are complex)
             def _norm(s: str) -> str:
-                return (
-                    s.lower()
-                    .replace("ä", "ae")
-                    .replace("ö", "oe")
-                    .replace("ü", "ue")
-                    .replace("ß", "ss")
-                )
-
+                return (s.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
             qn = _norm(req.question or "")
-
-            want_past = any(
-                k in qn
-                for k in [
-                    "gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher",
-                ]
-            )
-            want_next = any(
-                k in qn
-                for k in [
-                    "naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes",
-                ]
-            )
-
+            want_past = any(k in qn for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"])
+            want_next = any(k in qn for k in ["naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes"])
             yr = None
             m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
             if m:
-                try:
-                    yr = int(m.group(1))
-                except ValueError:
-                    yr = None
+                try: yr = int(m.group(1))
+                except ValueError: yr = None
+            
+            # --- CHUNK ANALYSIS (Step 1 & 2: Prioritize Chunks) ---
+            chunk_events = []
+            for ch in ranked:
+                # Extract date from chunk metadata/data (metadata is more reliable for events)
+                d_meta = ch.get('metadata', {}).get('dates', [None])
+                d_str = d_meta[0] if d_meta else None
+                u = ch.get('url', ch.get('metadata', {}).get('source', ''))
+
+                dt_obj = parse_de_date(d_str) if d_str else None
+                
+                # Simple filter: must have a date and be related to events/workshops
+                # We check for a date AND high relevance from the search, or an explicit URL match.
+                is_relevant_event = dt_obj and any(k in u.lower() for k in ["impuls-workshops", "termine", "events"])
+                
+                if is_relevant_event:
+                    chunk_events.append({
+                        "date": dt_obj, 
+                        "title": ch.get("title", "(Ohne Titel)"), 
+                        "url": u, 
+                        "_d": dt_obj # Normalized datetime object for sorting/filtering
+                    })
+
+            # 3. If relevant events found in chunks, proceed with chunk-based filtering/rendering
+            if chunk_events:
+                
+                today = datetime.now(timezone.utc).date()
+                future_chunk_events = [e for e in chunk_events if e["_d"].date() >= today]
+                past_chunk_events = [e for e in chunk_events if e["_d"].date() < today]
+
+                print(f"Y Chunks found: future={len(future_chunk_events)}, past={len(past_chunk_events)}")
+                
+                if want_next:
+                    events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])[:1]
+                    title_suffix = "(aus KB)"
+                elif want_past:
+                    if yr: past_chunk_events = [e for e in past_chunk_events if e["_d"].year == yr]
+                    events_to_show = sorted(past_chunk_events, key=lambda x: x["_d"], reverse=True)
+                    title_suffix = "(aus KB)" + (f" {yr}" if yr else "")
+                else: # Default: all future events from chunks
+                    events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])
+                    title_suffix = "(aus KB)"
+                    
+                html = render_workshops_timeline_html(
+                    events_to_show, 
+                    title=("Nächster Impuls-Workshop" if want_next else "Kommende Impuls-Workshops") + title_suffix
+                )
+
+                # Return result based on chunks (Prioritization)
+                return AnswerResponse(
+                    answer=html,
+                    sources=[SourceItem(title=e['title'], url=e['url']) for e in events_to_show if 'title' in e and 'url' in e] 
+                )
+
+            # 4. Fallback to LIVE SCRAPER (Original intention when chunks fail)
 
             events = fetch_live_impuls_workshops()
             norm_events = []
@@ -362,64 +395,28 @@ def ask(req: QuestionRequest):
             future = [e for e in norm_events if e["_d"].date() >= today]
             past = [e for e in norm_events if e["_d"].date() < today]
 
-            print(
-                f"Y Workshops counts: future={len(future)}, past={len(past)}  (raw={len(norm_events)})"
-            )
-
-            # a) nur nächster Workshop
+            # Re-apply filtering/sorting logic on live data
             if want_next:
                 future_sorted = sorted(future, key=lambda x: x["_d"])
                 events_to_show = future_sorted[:1]
-                html = render_workshops_timeline_html(
-                    events_to_show, title="Nächster Impuls-Workshop"
-                )
-                return AnswerResponse(
-                    answer=html,
-                    sources=[
-                        SourceItem(
-                            title="Impuls-Workshop-Übersicht", url=IMPULS_URL
-                        )
-                    ],
-                )
-
-            # b) vergangene, evtl. mit Jahresfilter
-            if want_past:
-                if yr:
-                    past = [e for e in past if e["_d"].year == yr]
+                html = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop (Live)")
+            elif want_past:
+                if yr: past = [e for e in past if e["_d"].year == yr]
                 past_sorted = sorted(past, key=lambda x: x["_d"], reverse=True)
-                html = render_workshops_timeline_html(
-                    past_sorted,
-                    title=(
-                        "Vergangene Impuls-Workshops"
-                        + (f" {yr}" if yr else "")
-                    ),
-                )
-                return AnswerResponse(
-                    answer=html,
-                    sources=[
-                        SourceItem(
-                            title="Impuls-Workshop-Übersicht", url=IMPULS_URL
-                        )
-                    ],
-                )
-
-            # c) Default: alle ab heute
-            future_sorted = sorted(future, key=lambda x: x["_d"])
-            html = render_workshops_timeline_html(
-                future_sorted, title="Kommende Impuls-Workshops"
-            )
+                html = render_workshops_timeline_html(past_sorted, title="Vergangene Impuls-Workshops (Live)" + (f" {yr}" if yr else ""))
+            else:
+                future_sorted = sorted(future, key=lambda x: x["_d"])
+                html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops (Live)")
+            
+            # Return result based on live pages 
             return AnswerResponse(
                 answer=html,
-                sources=[
-                    SourceItem(
-                        title="Impuls-Workshop-Übersicht", url=IMPULS_URL
-                    )
-                ],
+                sources=[SourceItem(title="Impuls-Workshop-Übersicht", url=IMPULS_URL)],
             )
-
-        # ---- Ende Workshop-Sonderfall – ab hier normaler RAG+LLM-Weg ----
-
-        # =============== Default LLM Branch ==================
+            
+        # ---- Ende Workshop-Sonderfall
+        
+        # =============== Default LLM/RAG Branch (e.g., for Innovationsfonds, Fobizz) ==================
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(req.question, ranked)
         answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
@@ -427,7 +424,7 @@ def ask(req: QuestionRequest):
         
         # Quellenliste für die AnswerResponse erzeugen
         sources = build_sources(ranked, limit=req.max_sources or 4)
-
+        
         if not answer_html.strip():
              answer_html = "<p>Leider konnte keine Antwort generiert werden.</p>" # Fallback
              
@@ -441,7 +438,7 @@ def ask(req: QuestionRequest):
         logger.info(f"Returning answer: {repr(msg)[:400]}")
         return AnswerResponse(answer=msg, sources=[])
 
-# --- Knowledge Base Loading and Indexing ------------------------------------
+# --- Knowledge Base Loading and Indexing (The rest of the file) ------------------------------------
 
 def load_chunks(path: str) -> List[Dict]:
     """Load the knowledge base .json or .jsonl robustly."""
@@ -933,3 +930,11 @@ if __name__ == "__main__":
     import uvicorn
     # uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
     pass
+"""
+
+# Write the corrected code to a new file
+file_name = "ultimate_api_corrected.py"
+with open(file_name, "w") as f:
+    f.write(corrected_code)
+
+print(f"The corrected code has been saved to {file_name}")<ctrl46>}
