@@ -88,7 +88,7 @@ openai_client = OpenAI(api_key=settings.openai_apikey)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://perino.info"],
+    allow_origins=["https://perino.info"], # Passen Sie dies für Ihre Domains an
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -170,6 +170,7 @@ def summarize_long_text(text, max_length=180):
                 {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
                 {"role": "user", "content": prompt}
             ],
+            # Verwenden Sie max_tokens für die Zusammenfassung (oder max_completion_tokens, falls erforderlich)
             max_tokens=max_length,
             stream=False
         )
@@ -786,10 +787,296 @@ def fetch_live_impuls_workshops() -> List[Dict]:
     
     NOTE: Adjusted for more robust parsing based on observed structure.
     """
-    events = [] # Placeholder logic, since live scraping is fragile
+    events: List[Dict] = []
 
-    # Add the minimal necessary structure for the code to compile and run
-    return events
+    try:
+        r = requests.get(
+            IMPULS_URL,
+            timeout=15,
+            headers={"User-Agent": "DLH-Bot/1.0"},
+        )
+        r.raise_for_status()
+        html = r.text
+    except Exception as ex:
+        print("LIVE FETCH ERROR (Impuls: HTTP):", repr(ex))
+        return []
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+
+        # Offensichtlichen Müll entfernen
+        for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner"]:
+            for el in soup.select(sel):
+                el.decompose()
+
+        root = soup.select_one("main") or soup
+        
+        # Targetting the common structure: an <a> tag that contains a time and title, often in a list
+        for a in root.select("li a[href], div a[href]"):
+            # Try to extract elements relative to the link
+            parent = a.find_parent(["li", "div"])
+            
+            # Extract date string
+            date_str = ""
+            time_el = a.find_previous_sibling("time") or parent.find("time")
+            if time_el:
+                date_str = time_el.get_text(" ", strip=True)
+            
+            # Fallback: Check if date/time info is in the surrounding text (like the provided screenshot)
+            if not date_str and parent:
+                # Check for sibling elements that might contain the date
+                date_candidates = parent.select("span.date, div.date, time") 
+                date_str = " ".join([d.get_text(" ", strip=True) for d in date_candidates])
+            
+            # If no date found yet, try the main link text (less reliable)
+            if not date_str:
+                date_str = parent.get_text(" ", strip=True)
+                
+            dt = parse_de_date(date_str)
+            title = a.get_text(" ", strip=True) if a else ""
+            href = a.get("href") if a and a.has_attr("href") else ""
+
+            if href and href.startswith("/"):
+                href = urllib.parse.urljoin(IMPULS_URL, href)
+
+            if dt and title and href:
+                events.append(
+                    {
+                        "date": dt,
+                        "title": title,
+                        "url": href or IMPULS_URL,
+                    }
+                )
+        
+        # Doppelte raus
+        seen = set()
+        cleaned: List[Dict] = []
+        for e in events:
+            # Ensure 'date' is present and hashable before using it in the key
+            d_val = e.get("date")
+            if not d_val:
+                continue
+            key = (d_val.isoformat(), e["title"])
+            if key in seen:
+                continue
+            seen.add(key)
+            cleaned.append(e)
+
+        print(
+            f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events)})"
+        )
+        return cleaned
+
+    except Exception as ex:
+        print("LIVE FETCH ERROR (Impuls: parse):", repr(ex))
+        return []
+
+# --- LLM Prompt Building ----------------------------------------------------
+
+def truncates(s, n):
+    """Truncate a string to n chars, safe for log/faq."""
+    s = s or ""
+    return s if len(s) <= n else s[:max(0, n - 1)]
+
+def safe_snippet(snippet, max_len=MAX_SNIPPET_CHARS):
+    return snippet if len(snippet) <= max_len else snippet[:max(0, max_len-1)]
+
+def build_system_prompt() -> str:
+    # Final, highly assertive system prompt for structured, detailed output
+    return (
+        "Du bist ein kompetenter KI-Chatbot, der Fragen rund um die DLH-Webseite dlz.zh.ch, Impuls-Workshops, Innovationsfonds-Projekte, Weiterbildungen und verwandte Bildungsthemen beantwortet. "
+        "Deine Antwort **MUSS prägnant und auf Deutsch** sein. Nutze den bereitgestellten **Kontext (Chunks)** als primäre Wissensbasis. "
+        "Wenn du eine Antwort aus dem Kontext generierst, **MUSST du die Quellen nennen und verlinken**. "
+        "**WENN** die Frage eine Liste von Terminen, Workshops, Projekten oder Artikeln erfordert, **DANN MUSST DU** die Antwort unter Verwendung des entsprechenden HTML-Muster erzeugen, um die Links klickbar zu machen. Wenn die gesuchten Informationen fehlen, **antworte höflich, aber OHNE HTML-Struktur**.\n\n"
+        "**HTML-Muster für Termine/Workshops (Timeline):**\n"
+        "<section class='dlh-answer'>\n"
+        "<p>Deine kurze Einleitung (1-2 Sätze, z.B. 'Hier sind die kommenden Workshops:').</p>\n"
+        "<ol class='timeline'>\n"
+        "<li><time>2025-11-11</time> <a href='URL' target='_blank'>Titel des Workshops</a>"
+        "<div class='meta'>Ort/Format (falls bekannt)</div></li>\n"
+        "\n"
+        "</ol>\n"
+        "<h3>Quellen</h3>\n"
+        "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
+        "</section>\n\n"
+        "**HTML-Muster für Projekte/Artikel (Karten):**\n"
+        "<section class='dlh-answer'>\n"
+        "<p>Deine kurze Einleitung (1-2 Sätze, z.B. 'Der Innovationsfonds unterstützt folgende Projekte:').</p>\n"
+        "<div class='cards'>\n"
+        "<article class='card'>\n"
+        "<h4><a href='URL' target='_blank'>Projekttitel</a></h4>\n"
+        "<p>Kurze Beschreibung (1–2 Sätze).</p>\n"
+        "</article>\n"
+        "\n"
+        "</div>\n"
+        "<h3>Quellen</h3>\n"
+        "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
+        "</section>"
+    )
+
+def build_user_prompt(query: str, ranked: List[Dict]) -> str:
+    """
+    Builds user prompt including context from search results.
+    Prioritizes 'content' over 'snippet' for rich context.
+    """
+    source_snips = []
+    for ch in ranked:
+        # Prioritize rich 'content' but fallback to 'snippet'
+        raw_text = ch.get("content") or ch.get("snippet") or "" 
+        
+        # Apply truncation to keep prompt size manageable
+        snippet = safe_snippet(raw_text, MAX_SNIPPET_CHARS) 
+        
+        url = ch.get("url", "")
+        title = ch.get("title", "Quelle") 
+        
+        if snippet:
+            # IMPORTANT: Explicitly include URL and Title in the source snippet for the LLM to use
+            source_snips.append(f"Quelle: {title} (URL: {url})\n{snippet}")
+            
+    context = "\n---\n".join(source_snips)
+    # The final prompt should clearly state the user's question and provide the context.
+    return f"Frage: {query.strip()}\nKontext zur Beantwortung (verwende diese Informationen, um die Antwort zu generieren, AUCH um HTML-Links zu erstellen):\n{context}" if context else query.strip()
+
+def build_sources(ranked: List[Dict], limit: int = 4):
+    """Extracts and formats sources for AnswerResponse."""
+    out = []
+    seen = set() 
+    for ch in ranked[:limit]:
+        title = ch.get("title", "(Quelle)")
+        url = ch.get("url", "")
+        key = (title, url)
+
+        if key not in seen:
+            # Summarization done here to get the snippet for the SourceItem model
+            raw_text = ch.get('snippet') or ch.get('content', '')
+            snippet = summarize_long_text(raw_text)
+            out.append(
+                SourceItem(
+                    title=title,
+                    url=url,
+                    snippet=snippet
+                )
+            )
+            seen.add(key)
+    return out
+
+
+def ensure_clickable_links(answer_html: str) -> str:
+    """Ensure all links in LLM output are clickable (basic HTML patch, expand as needed)."""
+    if not answer_html:
+        return ""
+    # This regex is meant to turn bare URLs into clickable links.
+    return re.sub(
+        r'\b(https?://[a-zA-Z0-9_\-./?=#%&]+)\b',
+        r'<a href="\1" target="_blank">\1</a>',
+        answer_html,
+        flags=re.IGNORECASE,
+    )
+
+# --- Debug and Info Endpoints (Restored from original file) ---
+
+@app.get("/debug/validate")
+def debug_validate():
+    """Runs prompt validation without calling OpenAI."""
+    try:
+        # Note: This validate_prompts function is defined *after* this endpoint.
+        # This is generally bad practice, but we are matching the uploaded file structure.
+        # In a production refactor, validate_prompts should be defined before use.
+        res = validate_prompts()
+        logger.info(f"Validate check: {res}")
+        return res
+    except Exception as e:
+        logger.error(f"Validation error: {e}")
+        return {"ok": False, "error": str(e)}
+
+
+@app.get("/debug/faq/{subject}")
+def debug_faq(subject: str):
+    html = build_faq_list_html(subject)
+    return {"subject": subject, "html": html}
+
+@app.get("/debug/chunks_by_tag/{tag}")
+def debug_chunks_by_tag(tag: str):
+    return {"tag": tag, "chunks": get_chunks_by_tag(tag)}
+
+@app.get("/debug/sitemap")
+def debug_sitemap():
+    return {
+        "loaded": SITEMAP_LOADED,
+        "urls": len(SITEMAP_URLS),
+        "sections": {k: len(v) for k, v in SITEMAP_SECTIONS.items()}
+    }
+
+@app.get("/_kb")
+def kb_info():
+    return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(settings.chunks_path)}
+
+@app.get("/debug/impuls")
+def debug_impuls():
+    ev = fetch_live_impuls_workshops()
+    return {
+        "count": len(ev),
+        "events": [
+            {
+                "date": _event_to_date(e).isoformat() if _event_to_date(e) else None,
+                "title": e.get("title"),
+                "url": e.get("url"),
+            }
+            for e in ev[:10]
+        ],
+    }
+
+@app.get("/")
+def root():
+    return {
+        "ok": True,
+        "service": "DLH OpenAI API",
+        "endpoints": ["/health", "/ask", "/version", "/debug/deps", "/debug/impuls", "/debug/validate", "/debug/sitemap", "/_kb"]
+    }
+
+@app.get("/health")
+def health():
+    return {
+        "status": "healthy",
+        "chunks_loaded": len(CHUNKS),
+        "model": settings.openai_model
+    }
+
+@app.get("/version")
+def version():
+    return {
+        "version": "openai-backend",
+        "model": settings.openai_model,
+    }
+
+@app.get("/debug/deps")
+def debug_deps():
+    import platform
+    import openai as _openai_pkg
+    import bs4 as _bs4_pkg
+    versions = {
+        "python": platform.python_version(),
+        "openai": getattr(_openai_pkg, "__version__", "?"),
+        "bs4": getattr(_bs4_pkg, "__version__", "?"),
+    }
+    logger.info(f"Dependency versions: {versions}")
+    return versions
+
+# This function was referenced earlier but defined later in the original script.
+def validate_prompts():
+    # Simple validation to check if all system/user prompts and chunk loading work as expected
+    try:
+        prompts = []
+        for ch in CHUNKS[:2]:
+            sys = build_system_prompt()
+            user = build_user_prompt("Testfrage", [ch])
+            prompts.append({"sys": sys, "user": user})
+        logger.info("Prompt validation success")
+        return {"ok": True, "prompt_count": len(prompts)}
+    except Exception as e:
+        logger.warning("Prompt validation failed: %s", repr(e))
+        return {"ok": False, "error": str(e)}
 
 
 if __name__ == "__main__":
