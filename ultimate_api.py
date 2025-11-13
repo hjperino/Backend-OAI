@@ -250,6 +250,7 @@ def ask(req: QuestionRequest):
             
     try:
         # other logic
+        print("Sources right before answer:", sources)
         sources = []  # define your sources list
         if sources and any(s.snippet for s in sources):
             answer_html = "<br><br>".join([f"<b>{s.title}</b>: {s.snippet}" for s in sources if s.snippet])
