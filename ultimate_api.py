@@ -17,7 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 # Use pydantic_settings for environment variable loading
 from pydantic_settings import BaseSettings
-from collections import defaultdict, Counter # Hinzugefügt für advanced_search
+from collections import defaultdict, Counter 
 
 # --- Configuration (Loaded from Environment/Settings) -----------------------
 
@@ -334,14 +334,13 @@ def ask(req: QuestionRequest):
                 # Extract event data from chunk if it looks like an event
                 u = ch.get('url', ch.get('metadata', {}).get('source', ''))
                 
-                # Check for relevance: must have a date and be related to workshops/events
+                # Check for relevance: must be related to events or workshops
                 is_relevant_event = any(k in u.lower() for k in ["impuls-workshops", "termine", "events", "aktuell"])
                 
                 if is_relevant_event:
-                    # Chunks can contain multiple dates/events in metadata. Try to extract ALL relevant events.
+                    # Chunks often contain multiple dates/events in metadata. Extract all.
                     d_meta = ch.get('metadata', {}).get('dates', [])
                     
-                    # For a single chunk, we iterate over all date strings found in its metadata:
                     for d_str in d_meta:
                         dt_obj = parse_de_date(d_str)
                         
@@ -349,7 +348,7 @@ def ask(req: QuestionRequest):
                              # Append the chunk/date pair as a single event item
                             chunk_events.append({
                                 "date": dt_obj, 
-                                "title": ch.get("title", "(Ohne Titel)") + " (" + d_str + ")", 
+                                "title": ch.get("title", "(Ohne Titel)") + f" ({d_str})", 
                                 "url": u, 
                                 "_d": dt_obj # Normalized datetime object for sorting/filtering
                             })
@@ -598,14 +597,6 @@ def load_sitemap_local(path: str = "processed/dlh_sitemap.xml") -> Dict[str, int
 # Load sitemap at startup if file exists
 SITEMAP_STATS = load_sitemap_local()
 
-def normalize_subject_to_slug(q: str) -> Optional[str]:
-    """Normalizes a subject/query string to a URL 'tag' slug for innovationsfonds."""
-    if not q:
-        return None
-    q = q.lower().replace(" ", "-").replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss")
-    # Simplify further normalization logic as needed
-    return re.sub(r"[^a-z0-9-]", "", q.strip("-"))
-
 def sitemap_find_innovations_tag(tag: str) -> Optional[str]:
     """Find the matching innovationsfonds tag URL from the sitemap buckets."""
     if not tag or not SITEMAP_SECTIONS:
@@ -756,7 +747,7 @@ def build_system_prompt() -> str:
     # Final, highly assertive system prompt for structured, detailed output
     return (
         "Du bist ein kompetenter KI-Chatbot, der Fragen rund um die DLH-Webseite dlz.zh.ch, Impuls-Workshops, Innovationsfonds-Projekte, Weiterbildungen und verwandte Bildungsthemen beantwortet. "
-        "Deine Antwort **MUSS prägnant und auf Deutsch** sein. Nutze den bereitgestellten **Kontext (Chunks)** als ALLEINIGE Wissensbasis. "
+        "Deine Antwort **MUSS prägnant und auf Deutsch** sein. Nutze den bereitgestellten **Kontext** (Chunks) als ALLEINIGE Wissensbasis. "
         "Wenn du eine Antwort aus dem Kontext generierst, **MUSST du die Quellen nennen und verlinken**. "
         "**WENN** die Frage eine Liste von Terminen, Workshops, Projekten oder Artikeln erfordert, **DANN MUSST DU** die Antwort unter Verwendung des entsprechenden HTML-Muster erzeugen, um die Links klickbar zu machen. Wenn die gesuchten Informationen fehlen, **antworte höflich, aber OHNE HTML-Struktur**.\n\n"
         "**HTML-Muster für Termine/Workshops (Timeline):**\n"
@@ -796,13 +787,13 @@ def build_user_prompt(query: str, ranked: List[Dict]) -> str:
         raw_text = ch.get("content") or ch.get("snippet") or "" 
         
         # Apply truncation to keep prompt size manageable
-        # NOTE: If we use the raw_text, we should use the page title as snippet/context label
         snippet = safe_snippet(raw_text, MAX_SNIPPET_CHARS) 
         
         url = ch.get("url", "")
         title = ch.get("title", "Quelle") 
         
         if snippet:
+            # IMPORTANT: Explicitly include URL and Title in the source snippet for the LLM to use
             source_snips.append(f"Quelle: {title} (URL: {url})\n{snippet}")
             
     context = "\n---\n".join(source_snips)
@@ -812,7 +803,6 @@ def build_user_prompt(query: str, ranked: List[Dict]) -> str:
 def build_sources(ranked: List[Dict], limit: int = 4) -> List[SourceItem]:
     """Extracts and formats sources for AnswerResponse."""
     out = []
-    # Use a set to track unique URLs/titles to avoid duplicate source links in the UI.
     seen = set() 
     for ch in ranked[:limit]:
         title = ch.get("title", "(Quelle)")
@@ -838,8 +828,7 @@ def ensure_clickable_links(answer_html: str) -> str:
     """Ensure all links in LLM output are clickable (basic HTML patch, expand as needed)."""
     if not answer_html:
         return ""
-    # This function is now more focused on cleaning up URLs left by the LLM outside the template,
-    # though the LLM is instructed to use the HTML templates.
+    # This regex is meant to turn bare URLs into clickable links.
     return re.sub(
         r'\b(https?://[a-zA-Z0-9_\-./?=#%&]+)\b',
         r'<a href="\1" target="_blank">\1</a>',
@@ -847,255 +836,8 @@ def ensure_clickable_links(answer_html: str) -> str:
         flags=re.IGNORECASE,
     )
 
-# ... (restliche Helper-Funktionen wie coerce_year, parse_de_date, load_chunks, etc.) ...
-# NOTE: The implementation of fetch_live_impuls_workshops is kept for the fallback.
-
-def _event_to_date(e: Dict) -> Optional[datetime]:
-    """
-    Hilfsfunktion für die Workshop-Intentlogik:
-    nimmt ein Event-Dict und liefert ein datetime-Objekt.
-    """
-    if not isinstance(e, dict):
-        return None
-
-    d = e.get("date")
-    if isinstance(d, datetime):
-        return d
-
-    txt = e.get("when") or e.get("title") or ""
-    return parse_de_date(txt)
-
-# --- Date Parsing Helpers ---------------------------------------------------
-
-def coerce_year(y, refyear):
-    if not y:
-        return refyear
-    y = y.strip()
-    if len(y) == 2:
-        y = "20" + y
-    try:
-        return int(y)
-    except Exception:
-        return refyear
-
-def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[datetime]:
-    """Versucht ein Datum (und ggf. Uhrzeit) aus deutschem Text zu extrahieren."""
-    if not text:
-        return None
-    t = text.strip()
-    rd = ref_date or datetime.now(timezone.utc)
-    ref_year = rd.year
-
-    # 1) 11.11.2025
-    m = DMY_DOTTED_RE.search(t)
-    hh, mm = None, None
-    tm = TIME_RE.search(t)
-    if tm:
-        hh, mm = int(tm.group(1)), int(tm.group(2))
-    if m:
-        d = int(m.group(1))
-        mth = int(m.group(2))
-        y = coerce_year(m.group(3), ref_year)
-        try:
-            base = datetime(y, mth, d, tzinfo=timezone.utc)
-            if hh is not None:
-                base = base.replace(hour=hh, minute=mm or 0)
-            return base
-        except Exception:
-            pass
-
-    # 2) 25. Nov 2025 / 25. November (Jahr optional)
-    m = DMY_TEXT_RE.search(t)
-    if m:
-        d = int(m.group(1))
-        month_word = (m.group(2) or "").strip().lower()
-        # Umlaute vereinheitlichen
-        month_word = (month_word
-                      .replace("ä", "ae")
-                      .replace("ö", "oe")
-                      .replace("ü", "ue"))
-        mth = MONTHS_DE.get(month_word)
-        y = coerce_year(m.group(3), ref_year)
-        if mth:
-            try:
-                base = datetime(y, mth, d, tzinfo=timezone.utc)
-                if hh is not None:
-                    base = base.replace(hour=hh, minute=mm or 0)
-                return base
-            except Exception:
-                pass
-
-    return None
-    
-def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
-    """
-    Erzeugt eine einfache HTML-Timeline mit Datum + klickbarem Titel.
-    """
-    if not events:
-        html_str = (
-            "<section class='dlh-answer'>"
-            "<p>Keine Workshops gefunden.</p>"
-            "<h3>Quellen</h3>"
-            "<ul class='sources'>"
-            f"<li><a href='{IMPULS_URL}' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
-            "</ul></section>"
-        )
-        logger.info(f"Returning answer: {repr(html_str)[:400]}")
-        return html_str
-
-    items_html = []
-    for e in events:
-        d = _event_to_date(e)
-        date_str = d.strftime("%d.%m.%Y") if d else ""
-        t = e.get("title", "Ohne Titel")
-        url = e.get("url") or IMPULS_URL
-        place = e.get("place") or ""
-        meta = f"<div class='meta'>{place}</div>" if place else ""
-        items_html.append(
-            f"<li><time>{date_str}</time> "
-            f"<a href='{url}' target='_blank' rel='noopener noreferrer'>{t}</a>{meta}</li>"
-        )
-
-    # Use title directly from the function argument, which includes (aus KB) or (Live)
-    html_str = (
-        "<section class='dlh-answer'>"
-        f"<p>{title}:</p>"
-        "<ol class='timeline'>" + "".join(items_html) + "</ol>"
-        "<h3>Quellen</h3>"
-        "<ul class='sources'>"
-        f"<li><a href='{IMPULS_URL}' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
-        "</ul></section>"
-    )
-    logger.info(f"Returning answer: {repr(html_str)[:400]}")
-    return html_str
-
-def load_chunks(path: str) -> List[Dict]:
-    """Load the knowledge base .json or .jsonl robustly."""
-    out = []
-    p = Path(path)
-    if not p.exists():
-        logger.warning(f"⚠️ KB not found at {p.resolve()}")
-        return []
-    if p.suffix == ".jsonl":
-        with p.open("r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    out.append(json.loads(line))
-                except Exception:
-                    logger.debug(f"Skipping invalid JSON line in {path}")
-                    continue
-        return out
-    else:
-        try:
-            return json.load(p.open("r", encoding="utf-8"))
-        except Exception as e:
-            logger.error(f"Failed to load chunks from {path}: {e}")
-            return []
-
-# --- Knowledge Base Loading and Indexing ------------------------------------
-
-# Load chunks immediately after settings and utility functions
-CHUNKS: List[Dict] = load_chunks(settings.chunks_path)
-CHUNKS_COUNT = len(CHUNKS)
-logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {settings.chunks_path}")
-
-
-def index_chunks_by_subject(chunks):
-    """Returns: subject -> [chunk ids]"""
-    idx = defaultdict(list)
-    for i, ch in enumerate(chunks):
-        subject = ch.get("subject")
-        if subject:
-            idx[subject.lower()].append(i)
-    return idx
-
-SUBJECTINDEX = index_chunks_by_subject(CHUNKS)
-
-def extract_terms(query: str) -> Set[str]:
-    """Simple term extraction for keyword indexing."""
-    query = query.lower()
-    # Simple tokenization: split by non-alphanumeric, filter short/common words
-    tokens = re.split(r"[^a-zäöüß0-9]+", query)
-    return {t for t in tokens if len(t) > 2 and t not in ["der", "die", "das", "und", "oder"]}
-
-def index_chunks_by_keywords(chunks):
-    keywordindex = {}
-    for i, ch in enumerate(chunks):
-        keywords = ch.get("keywords", [])
-        for kw in keywords:
-            keywordindex.setdefault(kw.lower(), set()).add(i)
-    return keywordindex
-
-KEYWORDINDEX = index_chunks_by_keywords(CHUNKS)
-
-def advanced_search(query, max_items=12):
-    # Score chunks based on query tokens
-    tokens = set(extract_terms(query))
-    if not tokens:
-        return []
-    hits = Counter()
-    for token in tokens:
-        for idx in KEYWORDINDEX.get(token, []):
-            hits[idx] += 1
-    best_idxs = [idx for idx, _ in hits.most_common(max_items)]
-    results = [CHUNKS[idx] for idx in best_idxs]
-    logger.info(f"Advanced search for '{query}': {len(results)} hits")
-    return results
-
-# --- Sitemap handling (Minimal functions needed for flow) -------------------------------------------------------
-
-SITEMAP_URLS: List[str] = []
-SITEMAP_SECTIONS: Dict[str, List[str]] = {}
-SITEMAP_LOADED = False
-
-def load_sitemap_local(path: str = "processed/dlh_sitemap.xml") -> Dict[str, int]:
-    # Placeholder for large XML logic, assuming file exists.
-    try:
-        from xml.etree import ElementTree as ET
-        # ... (Actual loading logic remains the same, omitted for brevity but assumed functional)
-        return {"urls": 0, "sections": 0, "ok": 1} 
-    except Exception:
-        return {"urls": 0, "sections": 0, "ok": 0}
-
-SITEMAP_STATS = load_sitemap_local()
-
-
-def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
-    """Combines sitemap "boost" candidates with the core search, yielding a sorted hybrid result."""
-    # Placeholder for boost logic - relies heavily on advanced_search now
-    return advanced_search(query, max_items=max_items)
-
-
-def fetch_live_impuls_workshops() -> List[Dict]:
-    """
-    Liefert eine Liste von Workshops durch Live-Scraping.
-    (Detailed scraping logic is kept from before).
-    """
-    events: List[Dict] = []
-    # ... (omitted scraping logic for brevity, assumed functional)
-    return events
-
-
-# --- Debug and Info Endpoints (Restored to match original structure) -----------------------------------------------
-
-# ... (All other debug/utility functions are assumed to be present)
-
-def filter_chunks_by_section(chunks, section):
-    return [ch for ch in chunks if ch.get("section") == section]
-
-def get_chunks_by_tag(tag):
-    tag_lower = tag.lower()
-    return [ch for ch in CHUNKS if tag_lower in str(ch.get("tags", [])).lower()]
-
-def get_subject_faq(subject, max_items=10):
-    idxs = SUBJECTINDEX.get(subject.lower(), [])
-    return [CHUNKS[i] for i in idxs][:max_items]
-
-def debug_validate():
-    # Helper functions and classes defined in the main block are accessible here.
+def validate_prompts():
+    # Simple validation to check if all system/user prompts and chunk loading work as expected
     try:
         prompts = []
         for ch in CHUNKS[:2]:
@@ -1108,21 +850,31 @@ def debug_validate():
         logger.warning("Prompt validation failed: %s", repr(e))
         return {"ok": False, "error": str(e)}
 
+# --- Debug and Info Endpoints -----------------------------------------------
+
 @app.get("/debug/validate")
-def debug_validate_endpoint():
-    return debug_validate()
+def debug_validate():
+    """Runs prompt validation without calling OpenAI."""
+    try:
+        res = validate_prompts()
+        logger.info(f"Validate check: {res}")
+        return res
+    except Exception as e:
+        logger.error(f"Validation error: {e}")
+        return {"ok": False, "error": str(e)}
+
 
 @app.get("/debug/faq/{subject}")
-def debug_faq_endpoint(subject: str):
+def debug_faq(subject: str):
     html = build_faq_list_html(subject)
     return {"subject": subject, "html": html}
 
 @app.get("/debug/chunks_by_tag/{tag}")
-def debug_chunks_by_tag_endpoint(tag: str):
+def debug_chunks_by_tag(tag: str):
     return {"tag": tag, "chunks": get_chunks_by_tag(tag)}
 
 @app.get("/debug/sitemap")
-def debug_sitemap_endpoint():
+def debug_sitemap():
     return {
         "loaded": SITEMAP_LOADED,
         "urls": len(SITEMAP_URLS),
@@ -1130,11 +882,11 @@ def debug_sitemap_endpoint():
     }
 
 @app.get("/_kb")
-def kb_info_endpoint():
+def kb_info():
     return {"ok": True, "chunks_loaded": CHUNKS_COUNT, "path": str(settings.chunks_path)}
 
 @app.get("/debug/impuls")
-def debug_impuls_endpoint():
+def debug_impuls():
     ev = fetch_live_impuls_workshops()
     return {
         "count": len(ev),
@@ -1188,4 +940,3 @@ if __name__ == "__main__":
     import uvicorn
     # uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
     pass
-    
