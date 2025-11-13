@@ -236,7 +236,7 @@ def ask(req: QuestionRequest):
         answer_html = ensure_clickable_links(answer_html)
         sources = build_sources(ranked, limit=req.max_sources or 4)
         sources = []
-        for ch in ranked[:req.maxsources or 4]:
+        for ch in ranked[:req.max_sources or 4]:
             title = ch.get('title', 'Quelle')
             url = ch.get('url', '')
             raw_text = ch.get('snippet') or ch.get('text', '')
