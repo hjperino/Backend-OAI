@@ -37,7 +37,10 @@ class Settings (BaseSettings):
     openai_apikey: str
     openai_model: str
     chunks_path: str
-    
+
+print("CHUNKS loaded:", len(CHUNKS))
+print("First 2 chunks:", CHUNKS[:2])
+
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
 
@@ -50,8 +53,6 @@ class AnswerResponse(BaseModel):
     answer: str
     sources: List[SourceItem] = []
 
-from openai import OpenAI
-
 CHUNKSPATH = os.getenv("CHUNKSPATH", "processed/processed_chunks.json")
 PROMPTCHARSBUDGET = int(os.getenv("PROMPTCHARSBUDGET", "24000"))
 MAXHITSINPROMPT = 12
@@ -61,6 +62,7 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Config and Initialization ---
+from openai import OpenAI
 
 openai_client = OpenAI(api_key=settings.openai_apikey)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
