@@ -81,6 +81,9 @@ class QuestionRequest(BaseModel):
     language: Optional[str] = "de"
     max_sources: Optional[int] = 3
 
+def safe_add_lists(a, b):
+    return ensure_list(a) + ensure_list(b)
+
 def ensure_list(val):
     """Convert None to [], lists unchanged, single values/objects to [value], and AnswerResponse to list of its .sources."""
     if val is None:
