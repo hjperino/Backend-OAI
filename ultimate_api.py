@@ -186,7 +186,7 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
     if not events:
         html_str = (
             "<section class='dlh-answer'>"
-            "<p>Keine Workshops gefunden.</p>"
+            f"<p>Keine {title.replace('(aus KB)', '').replace('(Live)', '').strip()} gefunden.</p>"
             "<h3>Quellen</h3>"
             "<ul class='sources'>"
             f"<li><a href='{IMPULS_URL}' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
@@ -225,10 +225,9 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
 def render_structured_cards_html(items: List[Dict], title: str, source_url: str) -> str:
     """
     Generiert die HTML-Struktur für Projekte/Angebote (Karten-Layout) aus Python-Daten.
-    Wird verwendet, um LLM-Fehler in strukturierten Listen zu umgehen.
     """
     if not items:
-        return f"<p>Leider wurden keine passenden {title} gefunden.</p>"
+        return f"<p>Leider wurden keine passenden {title.replace('(aus KB)', '').strip()} gefunden.</p>"
 
     cards_html = []
     for item in items:
@@ -236,7 +235,9 @@ def render_structured_cards_html(items: List[Dict], title: str, source_url: str)
         item_title = item.get("title", "Unbekanntes Element")
         item_url = item.get("url", "#")
         item_desc = item.get("description") or item.get("content", "")
-        item_snippet = summarize_long_text(item_desc)
+        
+        # Use existing summary if available, otherwise generate one
+        item_snippet = item.get("snippet") or summarize_long_text(item_desc) 
         
         cards_html.append(
             f"<article class='card'>"
@@ -271,11 +272,14 @@ def extract_innovationsfonds_projects(chunks: List[Dict]) -> List[Dict]:
             # Use specific project metadata keys if available (common in your chunks)
             project_title = ch.get('metadata', {}).get('title', title)
             
+            # The project summary is often the content field itself or a separate snippet/description
+            project_description = ch.get('content', '')
+            
             if project_title:
                 projects.append({
                     "title": project_title,
                     "url": url,
-                    "description": content # Full content to be summarized by render function
+                    "description": project_description # Full content to be summarized by render function
                 })
     
     # Simple deduplication based on title/url pair
@@ -294,7 +298,7 @@ def extract_fobizz_resources(chunks: List[Dict]) -> List[Dict]:
     """Extrahiert allgemeine Fobizz-Angebote aus den relevanten Chunks."""
     fobizz_items = []
     for ch in chunks:
-        if "fobizz" in ch.get('url', '').lower() or "fobizz" in ch.get('title', '').lower():
+        if "fobizz" in ch.get('url', '').lower() or "fobizz" in ch.get('title', '').lower() or "fobizz" in ch.get('content', '').lower():
             title = ch.get('title')
             url = ch.get('url', ch.get('metadata', {}).get('source', '#'))
             content = ch.get('content', '')
@@ -305,8 +309,16 @@ def extract_fobizz_resources(chunks: List[Dict]) -> List[Dict]:
                     "url": url,
                     "description": content
                 })
-    # NOTE: In a real-world scenario, you might need NLP here to extract specific courses from the content.
-    return fobizz_items
+    # Simple deduplication
+    seen_keys = set()
+    deduplicated = []
+    for p in fobizz_items:
+        key = (p['title'], p['url'])
+        if key not in seen_keys:
+            deduplicated.append(p)
+            seen_keys.add(key)
+            
+    return deduplicated
 
 
 def _event_to_date(e: Dict) -> Optional[datetime]:
@@ -402,9 +414,9 @@ def ask(req: QuestionRequest):
         q_low = (req.question or "").lower()
 
 
-        # ---- 1. STRUCTURED HANDLER (Innovationsfonds / Fobizz / Workshops) ----
+        # ---- 1. STRUCTURED HANDLER (Innovationsfonds / Fobizz / Vernetzung) ----
 
-        # Check for specific intent keywords that require structured rendering
+        # 1a. Innovationsfonds Projects
         if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
             projects = extract_innovationsfonds_projects(ranked)
             if projects:
@@ -413,13 +425,13 @@ def ask(req: QuestionRequest):
                     title="DLH Innovationsfonds Projekte", 
                     source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
                 )
-                # We return here, bypassing the LLM RAG for structured content
                 return AnswerResponse(
                     answer=html_answer,
                     sources=[SourceItem(title=p['title'], url=p['url']) for p in projects[:req.max_sources or 4]]
                 )
         
-        if any(k in q_low for k in ["fobizz", "weiterbildung", "tool", "sprechstunde"]):
+        # 1b. Fobizz Resources
+        if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
             fobizz_items = extract_fobizz_resources(ranked)
             if fobizz_items:
                 html_answer = render_structured_cards_html(
@@ -432,12 +444,11 @@ def ask(req: QuestionRequest):
                     sources=[SourceItem(title=p['title'], url=p['url']) for p in fobizz_items[:req.max_sources or 4]]
                 )
 
-
         # ---- 2. WORKSHOP INTENT (Time-sensitive, requires custom filtering/sorting) ---
 
         if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
             
-            # Intent parsing logic (copied from original)
+            # Intent checking functions (re-defined locally as they are complex)
             def _norm(s: str) -> str:
                 return (s.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
             qn = _norm(req.question or "")
@@ -449,16 +460,19 @@ def ask(req: QuestionRequest):
                 try: yr = int(m.group(1))
                 except ValueError: yr = None
             
-            # --- CHUNK ANALYSIS (Prioritize Chunks for events) ---
+            # --- CHUNK ANALYSIS (Step 1 & 2: Prioritize Chunks) ---
             chunk_events = []
             for ch in ranked:
+                # Extract event data from chunk if it looks like an event
                 u = ch.get('url', ch.get('metadata', {}).get('source', ''))
                 
+                # Check for relevance: must be related to events or workshops
                 is_relevant_event = any(k in u.lower() for k in ["impuls-workshops", "termine", "events", "aktuell"])
                 
                 if is_relevant_event:
-                    # Iterate over ALL dates found in chunk metadata/data (Handles multi-event chunks)
+                    # Chunks often contain multiple dates/events in metadata. Extract all.
                     d_meta = ch.get('metadata', {}).get('dates', [])
+                    
                     for d_str in d_meta:
                         dt_obj = parse_de_date(d_str)
                         
@@ -502,9 +516,8 @@ def ask(req: QuestionRequest):
                 )
 
             # 4. Fallback to LIVE SCRAPER if CHUNKS yield nothing relevant
+
             events = fetch_live_impuls_workshops()
-            # ... (rest of original live scraping logic, adapted for reuse) ...
-            
             norm_events = []
             for e in events:
                 d = _event_to_date(e)
@@ -535,8 +548,9 @@ def ask(req: QuestionRequest):
                 answer=html,
                 sources=[SourceItem(title="Impuls-Workshop-Übersicht", url=IMPULS_URL)],
             )
-
-
+            
+        # ---- Ende Workshop-Sonderfall
+        
         # ---- 3. DEFAULT LLM/RAG BRANCH (General Concepts, Definitions, etc.) ----
         
         system_prompt = build_system_prompt()
@@ -589,9 +603,9 @@ def load_chunks(path: str) -> List[Dict]:
             return []
 
 # Load chunks immediately after settings and utility functions
-CHUNKS: List[Dict] = load_chunks(settings.chunks_path)
+CHUNKS: List[Dict] = load_chunks(CHUNKS_PATH)
 CHUNKS_COUNT = len(CHUNKS)
-logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {settings.chunks_path}")
+logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
 
 
 def index_chunks_by_subject(chunks):
@@ -665,7 +679,7 @@ def advanced_search(query, max_items=12):
     logger.info(f"Advanced search for '{query}': {len(results)} hits")
     return results
 
-# --- Sitemap handling -------------------------------------------------------
+# --- Sitemap handling ---
 
 SITEMAP_URLS: List[str] = []
 SITEMAP_SECTIONS: Dict[str, List[str]] = {}
@@ -1059,11 +1073,3 @@ if __name__ == "__main__":
     import uvicorn
     # uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
     pass
-"""
-
-# Write the corrected code to a new file
-file_name = "ultimate_api_corrected.py"
-with open(file_name, "w") as f:
-    f.write(corrected_code)
-
-print(f"The corrected code has been saved to {file_name}")<ctrl46>}
