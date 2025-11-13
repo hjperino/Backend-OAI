@@ -17,7 +17,7 @@ from pydantic import BaseModel, ValidationError
 
 # Use pydantic_settings for environment variable loading
 from pydantic_settings import BaseSettings
-from collections import defaultdict, Counter 
+from collections import defaultdict, Counter # Hinzugefügt für advanced_search
 
 # --- Configuration (Loaded from Environment/Settings) -----------------------
 
@@ -114,11 +114,11 @@ def ensure_list(val):
 
 def call_openai(system_prompt, user_prompt, max_tokens=1200):
     """
-    Calls the OpenAI API. Uses max_completion_tokens for models that require it,
-    falling back to max_tokens for broader compatibility.
+    Calls the OpenAI API. Uses max_completion_tokens (required by models like gpt-5) 
+    and includes a basic exception handler for models requiring max_tokens (standard).
     """
     try:
-        # 1. Attempt using max_completion_tokens (required by 'gpt-5' and some custom models)
+        # 1. Attempt using max_completion_tokens (as requested by your model error)
         response = openai_client.chat.completions.create(
             model=settings.openai_model,
             messages=[
@@ -129,22 +129,24 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
             stream=False,
         )
     except Exception as e:
-        # Check for the specific unsupported parameter error (Error code: 400)
-        # Note: In a real-world scenario, checking the error type is essential. 
-        # Here, we perform a safe fallback check.
         error_msg = str(e)
-        if "max_completion_tokens" in error_msg and "unsupported" in error_msg.lower():
+        # Check for the specific unsupported parameter error 
+        if 'unsupported parameter' in error_msg.lower() and 'max_tokens' in error_msg.lower():
             logger.warning(f"Model {settings.openai_model} rejected max_completion_tokens. Falling back to max_tokens.")
-            # 2. Fallback to max_tokens (standard for most official OpenAI models like gpt-4/3.5)
-            response = openai_client.chat.completions.create(
-                model=settings.openai_model,
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                max_tokens=max_tokens, 
-                stream=False,
-            )
+            # 2. Fallback to max_tokens (standard for most official OpenAI models)
+            try:
+                response = openai_client.chat.completions.create(
+                    model=settings.openai_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    max_tokens=max_tokens, 
+                    stream=False,
+                )
+            except Exception as e_fallback:
+                logger.error(f"OpenAI API ERROR (Fallback failed): {repr(e_fallback)}\n{format_exc()}")
+                return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
         else:
             # Re-raise if it's a different, unrecoverable error
             logger.error(f"OpenAI API ERROR (unhandled): {repr(e)}\n{format_exc()}")
@@ -176,7 +178,6 @@ def summarize_long_text(text, max_length=180):
         summary = response.choices[0].message.content.strip()
         return summary
     except Exception as e:
-        # Note: Using max_tokens for compatibility here, similar to the main fix logic.
         logger.error(f"OpenAI Summarization error: {repr(e)}")
         return text[:max_length]
 
@@ -426,7 +427,7 @@ def ask(req: QuestionRequest):
         
         # Quellenliste für die AnswerResponse erzeugen
         sources = build_sources(ranked, limit=req.max_sources or 4)
-        
+
         if not answer_html.strip():
              answer_html = "<p>Leider konnte keine Antwort generiert werden.</p>" # Fallback
              
@@ -652,6 +653,8 @@ def fetch_live_impuls_workshops() -> List[Dict]:
     Liefert eine Liste von Workshops im Format:
       [{"date": datetime, "title": str, "url": str}, ...]
     Direkt von https://dlh.zh.ch/home/impuls-workshops.
+    
+    NOTE: Adjusted for more robust parsing based on observed structure.
     """
     events: List[Dict] = []
 
