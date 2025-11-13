@@ -221,6 +221,94 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
     logger.info(f"Returning answer: {repr(html_str)[:400]}")
     return html_str
 
+
+def render_structured_cards_html(items: List[Dict], title: str, source_url: str) -> str:
+    """
+    Generiert die HTML-Struktur für Projekte/Angebote (Karten-Layout) aus Python-Daten.
+    Wird verwendet, um LLM-Fehler in strukturierten Listen zu umgehen.
+    """
+    if not items:
+        return f"<p>Leider wurden keine passenden {title} gefunden.</p>"
+
+    cards_html = []
+    for item in items:
+        # Ensure title and URL exist and create summary from content if available
+        item_title = item.get("title", "Unbekanntes Element")
+        item_url = item.get("url", "#")
+        item_desc = item.get("description") or item.get("content", "")
+        item_snippet = summarize_long_text(item_desc)
+        
+        cards_html.append(
+            f"<article class='card'>"
+            f"<h4><a href='{item_url}' target='_blank'>{item_title}</a></h4>"
+            f"<p>{item_snippet}</p>"
+            f"</article>"
+        )
+
+    html_str = (
+        f"<section class='dlh-answer'>"
+        f"<p>{title} (aus KB):</p>"
+        f"<div class='cards'>" + "".join(cards_html) + "</div>"
+        f"<h3>Quellen</h3>"
+        f"<ul class='sources'>"
+        f"<li><a href='{source_url}' target='_blank'>DLH Wissensbasis</a></li>"
+        "</ul></section>"
+    )
+    return html_str
+
+
+def extract_innovationsfonds_projects(chunks: List[Dict]) -> List[Dict]:
+    """Extrahiert alle Projekte mit Metadaten aus den relevanten Chunks."""
+    projects = []
+    for ch in chunks:
+        # Check if the chunk contains project-specific metadata/content
+        if "innovationsfonds" in ch.get('url', '').lower() or ch.get('metadata', {}).get('chunk_type') == 'innovationsfonds_project':
+            # Extract key fields. Content should be shortened for the card description.
+            title = ch.get('title')
+            url = ch.get('url', ch.get('metadata', {}).get('source', '#'))
+            content = ch.get('content', '')
+            
+            # Use specific project metadata keys if available (common in your chunks)
+            project_title = ch.get('metadata', {}).get('title', title)
+            
+            if project_title:
+                projects.append({
+                    "title": project_title,
+                    "url": url,
+                    "description": content # Full content to be summarized by render function
+                })
+    
+    # Simple deduplication based on title/url pair
+    seen_keys = set()
+    deduplicated = []
+    for p in projects:
+        key = (p['title'], p['url'])
+        if key not in seen_keys:
+            deduplicated.append(p)
+            seen_keys.add(key)
+            
+    return deduplicated
+
+
+def extract_fobizz_resources(chunks: List[Dict]) -> List[Dict]:
+    """Extrahiert allgemeine Fobizz-Angebote aus den relevanten Chunks."""
+    fobizz_items = []
+    for ch in chunks:
+        if "fobizz" in ch.get('url', '').lower() or "fobizz" in ch.get('title', '').lower():
+            title = ch.get('title')
+            url = ch.get('url', ch.get('metadata', {}).get('source', '#'))
+            content = ch.get('content', '')
+            
+            if title:
+                fobizz_items.append({
+                    "title": title,
+                    "url": url,
+                    "description": content
+                })
+    # NOTE: In a real-world scenario, you might need NLP here to extract specific courses from the content.
+    return fobizz_items
+
+
 def _event_to_date(e: Dict) -> Optional[datetime]:
     """
     Hilfsfunktion für die Workshop-Intentlogik:
@@ -235,6 +323,8 @@ def _event_to_date(e: Dict) -> Optional[datetime]:
 
     txt = e.get("when") or e.get("title") or ""
     return parse_de_date(txt)
+
+# --- Date Parsing Helpers ---------------------------------------------------
 
 def coerce_year(y, refyear):
     if not y:
@@ -301,22 +391,53 @@ def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[da
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
-        # 1. Perform retrieval from chunks regardless of intent
         try:
+            # 1. Perform retrieval from chunks regardless of intent
             ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 12)
         except Exception as e:
             logger.warning(f"Sitemap or advanced search failed: {repr(e)}. Falling back to advanced_search.")
             ranked = advanced_search(req.question, max_items=req.max_sources or 12)
         
         print("Y ranked types:", [type(x).__name__ for x in ranked[:5]])
-
-        # ---- Workshop-Sonderfall (Impuls-Workshops) - CHUNK PRIORITIZATION ---
         q_low = (req.question or "").lower()
 
-        if any(k in q_low for k in ["impuls", "workshop", "workshops"]):
-            print("Y Workshops: entered prioritization branch")
 
-            # Intent checking functions (re-defined locally as they are complex)
+        # ---- 1. STRUCTURED HANDLER (Innovationsfonds / Fobizz / Workshops) ----
+
+        # Check for specific intent keywords that require structured rendering
+        if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
+            projects = extract_innovationsfonds_projects(ranked)
+            if projects:
+                html_answer = render_structured_cards_html(
+                    projects, 
+                    title="DLH Innovationsfonds Projekte", 
+                    source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
+                )
+                # We return here, bypassing the LLM RAG for structured content
+                return AnswerResponse(
+                    answer=html_answer,
+                    sources=[SourceItem(title=p['title'], url=p['url']) for p in projects[:req.max_sources or 4]]
+                )
+        
+        if any(k in q_low for k in ["fobizz", "weiterbildung", "tool", "sprechstunde"]):
+            fobizz_items = extract_fobizz_resources(ranked)
+            if fobizz_items:
+                html_answer = render_structured_cards_html(
+                    fobizz_items, 
+                    title="DLH Fobizz Angebote", 
+                    source_url="https://dlh.zh.ch/home/wb-kompass/wb-angebote/1007-wb-plattformen"
+                )
+                return AnswerResponse(
+                    answer=html_answer,
+                    sources=[SourceItem(title=p['title'], url=p['url']) for p in fobizz_items[:req.max_sources or 4]]
+                )
+
+
+        # ---- 2. WORKSHOP INTENT (Time-sensitive, requires custom filtering/sorting) ---
+
+        if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
+            
+            # Intent parsing logic (copied from original)
             def _norm(s: str) -> str:
                 return (s.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
             qn = _norm(req.question or "")
@@ -328,44 +449,40 @@ def ask(req: QuestionRequest):
                 try: yr = int(m.group(1))
                 except ValueError: yr = None
             
-            # --- CHUNK ANALYSIS (Step 1 & 2: Prioritize Chunks) ---
+            # --- CHUNK ANALYSIS (Prioritize Chunks for events) ---
             chunk_events = []
             for ch in ranked:
-                # Extract event data from chunk if it looks like an event
                 u = ch.get('url', ch.get('metadata', {}).get('source', ''))
                 
-                # Check for relevance: must be related to events or workshops
                 is_relevant_event = any(k in u.lower() for k in ["impuls-workshops", "termine", "events", "aktuell"])
                 
                 if is_relevant_event:
-                    # Chunks often contain multiple dates/events in metadata. Extract all.
+                    # Iterate over ALL dates found in chunk metadata/data (Handles multi-event chunks)
                     d_meta = ch.get('metadata', {}).get('dates', [])
-                    
                     for d_str in d_meta:
                         dt_obj = parse_de_date(d_str)
                         
                         if dt_obj:
                              # Append the chunk/date pair as a single event item
+                             # NOTE: We use the raw date string in the title to help differentiate items originating from the same page
                             chunk_events.append({
                                 "date": dt_obj, 
                                 "title": ch.get("title", "(Ohne Titel)") + f" ({d_str})", 
                                 "url": u, 
-                                "_d": dt_obj # Normalized datetime object for sorting/filtering
+                                "_d": dt_obj 
                             })
 
-            # 3. If relevant events found in chunks, proceed with chunk-based filtering/rendering
             if chunk_events:
-                
+                # Proceed with chunk-based filtering/rendering
                 today = datetime.now(timezone.utc).date()
                 future_chunk_events = [e for e in chunk_events if e["_d"].date() >= today]
-                past_chunk_events = [e for e in chunk_events if e["_d"].date() < today]
-
-                print(f"Y Chunks found: future={len(future_chunk_events)}, past={len(past_chunk_events)}")
                 
+                # Apply filters based on intent
                 if want_next:
                     events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])[:1]
                     title_suffix = " (aus KB)"
                 elif want_past:
+                    past_chunk_events = [e for e in chunk_events if e["_d"].date() < today]
                     if yr: past_chunk_events = [e for e in past_chunk_events if e["_d"].year == yr]
                     events_to_show = sorted(past_chunk_events, key=lambda x: x["_d"], reverse=True)
                     title_suffix = " (aus KB)" + (f" {yr}" if yr else "")
@@ -384,9 +501,10 @@ def ask(req: QuestionRequest):
                     sources=[SourceItem(title=e['title'], url=e['url']) for e in events_to_show if 'title' in e and 'url' in e] 
                 )
 
-            # 4. Fallback to LIVE SCRAPER (Original intention when chunks fail)
-
+            # 4. Fallback to LIVE SCRAPER if CHUNKS yield nothing relevant
             events = fetch_live_impuls_workshops()
+            # ... (rest of original live scraping logic, adapted for reuse) ...
+            
             norm_events = []
             for e in events:
                 d = _event_to_date(e)
@@ -417,10 +535,10 @@ def ask(req: QuestionRequest):
                 answer=html,
                 sources=[SourceItem(title="Impuls-Workshop-Übersicht", url=IMPULS_URL)],
             )
-            
-        # ---- Ende Workshop-Sonderfall
+
+
+        # ---- 3. DEFAULT LLM/RAG BRANCH (General Concepts, Definitions, etc.) ----
         
-        # =============== Default LLM/RAG Branch (e.g., for Innovationsfonds, Fobizz) ==================
         system_prompt = build_system_prompt()
         user_prompt = build_user_prompt(req.question, ranked)
         answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
@@ -471,9 +589,9 @@ def load_chunks(path: str) -> List[Dict]:
             return []
 
 # Load chunks immediately after settings and utility functions
-CHUNKS: List[Dict] = load_chunks(CHUNKS_PATH)
+CHUNKS: List[Dict] = load_chunks(settings.chunks_path)
 CHUNKS_COUNT = len(CHUNKS)
-logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {CHUNKS_PATH}")
+logger.info(f"✅ Loaded {CHUNKS_COUNT} chunks from {settings.chunks_path}")
 
 
 def index_chunks_by_subject(chunks):
@@ -566,7 +684,8 @@ def load_sitemap_local(path: str = "processed/dlh_sitemap.xml") -> Dict[str, int
         if not p.exists():
             logger.warning(f"Sitemap not found at {path}")
             return stats
-        tree = ET.parse(str(p))
+        # Assuming the provided dlh_sitemap.xml is correct and accessible
+        tree = ET.parse(str(p)) 
         root = tree.getroot()
         ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
         urls = []
@@ -747,7 +866,7 @@ def build_system_prompt() -> str:
     # Final, highly assertive system prompt for structured, detailed output
     return (
         "Du bist ein kompetenter KI-Chatbot, der Fragen rund um die DLH-Webseite dlz.zh.ch, Impuls-Workshops, Innovationsfonds-Projekte, Weiterbildungen und verwandte Bildungsthemen beantwortet. "
-        "Deine Antwort **MUSS prägnant und auf Deutsch** sein. Nutze den bereitgestellten **Kontext** (Chunks) als ALLEINIGE Wissensbasis. "
+        "Deine Antwort **MUSS prägnant und auf Deutsch** sein. Nutze den bereitgestellten **Kontext (Chunks)** als primäre Wissensbasis. "
         "Wenn du eine Antwort aus dem Kontext generierst, **MUSST du die Quellen nennen und verlinken**. "
         "**WENN** die Frage eine Liste von Terminen, Workshops, Projekten oder Artikeln erfordert, **DANN MUSST DU** die Antwort unter Verwendung des entsprechenden HTML-Muster erzeugen, um die Links klickbar zu machen. Wenn die gesuchten Informationen fehlen, **antworte höflich, aber OHNE HTML-Struktur**.\n\n"
         "**HTML-Muster für Termine/Workshops (Timeline):**\n"
@@ -940,3 +1059,11 @@ if __name__ == "__main__":
     import uvicorn
     # uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
     pass
+"""
+
+# Write the corrected code to a new file
+file_name = "ultimate_api_corrected.py"
+with open(file_name, "w") as f:
+    f.write(corrected_code)
+
+print(f"The corrected code has been saved to {file_name}")<ctrl46>}
