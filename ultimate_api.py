@@ -608,7 +608,7 @@ def ensure_clickable_links(answer_html: str) -> str:
     if not answer_html:
         return ""
     return re.sub(
-        r'\b(https?://[a-zA-Z0-9_\-./?=#%&]+)\b',
+        r'\b(httpsB?://[a-zA-Z0-9_\-./?=#%&]+)\b',
         r'<a href="\1" target="_blank">\1</a>',
         answer_html,
         flags=re.IGNORECASE,
@@ -773,19 +773,21 @@ def validate_prompts():
 def debug_validate_endpoint():
     return validate_prompts()
 
+# (Definiere SUBJECTINDEX global, damit es in der FAQ-Funktion verwendet werden kann)
+def index_chunks_by_subject(chunks):
+    idx = defaultdict(list)
+    for i, ch in enumerate(chunks):
+        subject = ch.get("subject")
+        if subject:
+            idx[subject.lower()].append(i)
+    return idx
+SUBJECTINDEX = index_chunks_by_subject(CHUNKS)
+
 
 @app.get("/debug/faq/{subject}")
 def debug_faq(subject: str):
     
     def get_subject_faq(subject, max_items=10):
-        # Definiere SUBJECTINDEX (wird für RAG-Fallback benötigt)
-        idx = defaultdict(list)
-        for i, ch in enumerate(CHUNKS):
-            subject_val = ch.get("subject")
-            if subject_val:
-                idx[subject_val.lower()].append(i)
-        SUBJECTINDEX = idx
-        
         idxs = SUBJECTINDEX.get(subject.lower(), [])
         return [CHUNKS[i] for i in idxs][:max_items]
 
@@ -796,10 +798,11 @@ def debug_faq(subject: str):
         url = faq.get("url", "#")
         snippet = faq.get("snippet", "")
         arts.append(f"<article><h4><a href='{url}' target='_blank'>{title}</a></h4><p>{snippet}</p></article>")
-        # max_length ist in diesem Scope nicht definiert, setzen wir einen Standard
-        max_length = 1200 
+        
+        max_length = 1200 # Standardwert definieren
         if sum(len(a) for a in arts) > max_length:
             break
+            
     html = "<div class='faq-list'>" + "\n".join(filter(None, ensure_list(arts))) + "</div>" if arts else "<p>Keine FAQs gefunden.</p>"
     return {"subject": subject, "html": html}
 
