@@ -106,6 +106,30 @@ NORMALIZED_SUBJECT_MAP = {
 for k in SUBJECT_MAP.keys():
     NORMALIZED_SUBJECT_MAP[k] = k
 
+# --- NEU: HARDCODED CoP-Datenbank ---
+COPS_URL = "https://dlh.zh.ch/home/cops"
+COPS_HARDCODED_DB = [
+    {"title": "Allgemeinbildender Unterricht", "description": "Leitung: Erika Langhans", "url": COPS_URL},
+    {"title": "Chemie", "description": "Leitung: Amadeus Bärtsch", "url": COPS_URL},
+    {"title": "Deutsch", "description": "Leitung: Carmen Aus der Au, Natalija Jovanovic", "url": COPS_URL},
+    {"title": "Englisch", "description": "Leitung: Franziska Tobler, Marija Josifovic", "url": COPS_URL},
+    {"title": "Entwicklungsteamleitungen", "description": "Leitung: Hansjürg Perino", "url": COPS_URL},
+    {"title": "Fachkundige indiv. Begleitung FiB", "description": "Leitung: Nadine Vetterli", "url": COPS_URL},
+    {"title": "Gamification", "description": "Leitung: Benaja Schellenberg", "url": COPS_URL},
+    {"title": "GenKI", "description": "Leitung: Pascal Schmidt", "url": COPS_URL},
+    {"title": "Geografie", "description": "Leitung: Patrik Weiss", "url": COPS_URL},
+    {"title": "Geschichte", "description": "Leitung: Justine Burkhalter", "url": COPS_URL},
+    {"title": "Informatik", "description": "Leitung: Theresa Luternauer", "url": COPS_URL},
+    {"title": "KV", "description": "Leitung: Anita Schuler", "url": COPS_URL},
+    {"title": "Lehrpersonen Prävention und Gesundheitsförderung", "description": "Leitung: Christoph Staub", "url": COPS_URL},
+    {"title": "Medien- und Informationskompetenz", "description": "Leitung: Monica Bronner", "url": COPS_URL},
+    {"title": "Meta", "description": "Leitung: Christof Glaus", "url": COPS_URL},
+    {"title": "Moodle Admin", "description": "Leitung: Thomas Korner", "url": COPS_URL},
+    {"title": "Moodle Lehrpersonen", "description": "Leitung: Simon Küpfer", "url": COPS_URL},
+    {"title": "Religionen, Kulturen, Ethik", "description": "Leitung: Christoph Staub", "url": COPS_URL},
+    {"title": "Romanistik", "description": "Leitung: Francisca Ruiz (Spanisch), Letizia Martini (Italienisch), Ariane Chaoui Nowik (Französisch)", "url": COPS_URL}
+]
+
 
 # --- Global Constants & Initialization --------------------------------------
 
@@ -369,9 +393,9 @@ def render_structured_cards_html(items: List[Dict], title: str, source_url: str)
         # Use existing summary if available, otherwise generate one
         item_snippet = item.get("snippet") or summarize_long_text(item_desc) 
         
-        # KORREKTUR (DESIGN): Füge eine CSS-Klasse für den Abstand hinzu
+        # KORREKTUR (DESIGN): Füge CSS für "Box"-Darstellung hinzu (Abstand/Rahmen)
         cards_html.append(
-            f"<article class='card' style='margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px;'>"
+            f"<article class='card' style='margin-bottom: 15px; border: 1px solid #eee; padding: 10px; border-radius: 5px;'>"
             f"<h4><a href='{item_url}' target='_blank'>{item_title}</a></h4>"
             f"<p>{item_snippet}</p>"
             f"</article>"
@@ -674,7 +698,7 @@ def ensure_clickable_links(answer_html: str) -> str:
         flags=re.IGNORECASE,
     )
 
-# --- Main API Endpoint (NEUE LOGIK) ------------------------------------------------------
+# --- Main API Endpoint (Neue Logik) ------------------------------------------------------
 
 def _normalize_query_for_subjects(q: str) -> List[str]:
     """Wandelt eine Anfrage wie 'Wirtschaft und Recht' in ['wirtschaft', 'recht'] um."""
@@ -684,7 +708,7 @@ def _normalize_query_for_subjects(q: str) -> List[str]:
     found_subjects = []
     for token in q_tokens:
         if token in NORMALIZED_SUBJECT_MAP:
-            found_subjects.append(NORMALIZED_SUBJECT_MAP[token])
+            found_subjects.append(NORMALIZED_SUBJECT_MAP[token]) # z.B. 'chemie'
             
     return found_subjects
 
@@ -707,7 +731,7 @@ def ask(req: QuestionRequest):
             projects_to_show = all_projects
             title = "Alle DLH Innovationsfonds Projekte"
             
-            # NEU: Filterung nach Fach
+            # KORREKTUR: Filterung nach Fach
             subjects_in_query_keys = _normalize_query_for_subjects(q_low)
             
             if subjects_in_query_keys:
@@ -755,8 +779,23 @@ def ask(req: QuestionRequest):
                     answer=html_answer,
                     sources=returned_sources
                 )
+        
+        # 1c. CoPs (Communities of Practice) (NEU)
+        if any(k in q_low for k in ["cops", "communities of practice", "community"]):
+            cops_items = COPS_HARDCODED_DB # Greife auf die hardcodierte Liste zu
+            if cops_items:
+                html_answer = render_structured_cards_html(
+                    cops_items, 
+                    title="DLH Communities of Practice (CoPs)", 
+                    source_url="https://dlh.zh.ch/home/cops"
+                )
+                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in cops_items[:req.max_sources or 4]]
+                return AnswerResponse(
+                    answer=html_answer,
+                    sources=returned_sources
+                )
 
-        # 1c. WORKSHOP INTENT (Time-sensitive, aus DB)
+        # 1d. WORKSHOP INTENT (Time-sensitive, aus DB)
         if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
             
             def _norm(s: str) -> str:
@@ -830,7 +869,6 @@ def ask(req: QuestionRequest):
             
 
         # ---- 3. DEFAULT LLM/RAG BRANCH (General Concepts, Definitions, etc.) ----
-        # (Fragen wie "Was ist GenKI?" landen hier)
         return rag_fallback(req, q_low)
 
     except Exception as e:
