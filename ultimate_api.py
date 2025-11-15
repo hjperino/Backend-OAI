@@ -1,421 +1,907 @@
-"""
-Ultimate API server für DLH Chatbot - Kombiniert alle Verbesserungen
-"""
-
+import os
+import json
+import re
+import urllib.parse
+import logging
+import html
+import inspect
+import requests
+from datetime import datetime, timezone, date
+from typing import List, Dict, Optional, Tuple, Union, Set
+from pathlib import Path
+from bs4 import BeautifulSoup
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
-from typing import List, Optional, Dict, Tuple
-import json
-import os
-import re
-import uvicorn
-from anthropic import Anthropic
-from dotenv import load_dotenv
-from datetime import datetime
-from collections import Counter
+from traceback import format_exc
+from pydantic import BaseModel, ValidationError
 
-# Load environment variables
-load_dotenv()
+# Use pydantic_settings for environment variable loading
+from pydantic_settings import BaseSettings
+from collections import defaultdict, Counter 
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="DLH Chatbot API (Ultimate)",
-    description="AI-powered chatbot für dlh.zh.ch mit allen Optimierungen",
-    version="3.0.0"
+# --- Configuration (Loaded from Environment/Settings) -----------------------
+
+class Settings(BaseSettings):
+    """
+    Configuration loaded from environment variables (e.g., OPENAI_APIKEY).
+    """
+    openai_apikey: str
+    openai_model: str 
+    chunks_path: str = "processed/processed_chunks.json" 
+    structured_db_path: str = "processed/structured_db.json" # NEUER PFAD
+
+settings = Settings()
+CHUNKS_PATH = settings.chunks_path
+STRUCTURED_DB_PATH = settings.structured_db_path # NEU
+
+PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
+MAX_HITS_IN_PROMPT = 12
+MAX_SNIPPET_CHARS = 800
+
+# --- Pydantic Models (Consolidated) -----------------------------------------
+
+class SourceItem(BaseModel):
+    """Model for a single content source."""
+    title: str
+    url: str
+    snippet: Optional[str] = None 
+
+class AnswerResponse(BaseModel):
+    """Model for the final API response."""
+    answer: str
+    sources: List[SourceItem] = []
+
+class QuestionRequest(BaseModel):
+    """Model for the request body of the /ask endpoint."""
+    question: str
+    language: Optional[str] = "de"
+    max_sources: Optional[int] = 3
+
+# --- Logging Setup ----------------------------------------------------------
+
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# --- Datums-Parsing (de) ----------------------------------------------------
+# (Wird für Live-Scraping und DB-ISO-Strings benötigt)
+
+DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
+DMY_TEXT_RE = re.compile(
+    r"\b(\d{1,2})\.\s*([A-Za-zäöüÄÖÜ]+)\s*(\d{2,4})?\b",
+    re.IGNORECASE,
 )
+TIME_RE = re.compile(r"\b(\d{1,2})[:.](\d{2})\b")
 
-# Configure CORS
+MONTHS_DE = {
+    "jan": 1, "januar": 1, "feb": 2, "februar": 2, "mär": 3, "maerz": 3, 
+    "märz": 3, "mar": 3, "apr": 4, "april": 4, "mai": 5, "jun": 6, "juni": 6,
+    "jul": 7, "juli": 7, "aug": 8, "august": 8, "sep": 9, "sept": 9, 
+    "september": 9, "okt": 10, "oktober": 10, "nov": 11, "november": 11,
+    "dez": 12, "dezember": 12,
+}
+
+# --- Global Constants & Initialization --------------------------------------
+
+from openai import OpenAI
+IMPULS_URL = "https://dlh.zh.ch/home/impuls-workshops" 
+
+openai_client = OpenAI(api_key=settings.openai_apikey)
+app = FastAPI(title="DLH OpenAI API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["https://perino.info"], # Passen Sie dies für Ihre Domains an
     allow_credentials=True,
-    allow_methods=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
 
-# Initialize Anthropic client
-anthropic_client = Anthropic(api_key=os.getenv("ANTHROPIC_API_KEY"))
 
-# Load and preprocess data
-def load_and_preprocess_data():
-    """Lade und bereite Daten mit verbesserter Struktur vor"""
+# --- Utility Functions ------------------------------------------------------
+
+def safe_add_lists(a, b):
+    return ensure_list(a) + ensure_list(b)
+
+def ensure_list(val):
+    """Convert None to [], lists unchanged, single values/objects to [value], and AnswerResponse to list of its .sources."""
+    if val is None:
+        return []
+    if hasattr(val, "sources"):
+        return ensure_list(val.sources)
+    if isinstance(val, list):
+        return val
+    return [val]
+
+def call_openai(system_prompt, user_prompt, max_tokens=1200):
+    """
+    Calls the OpenAI API. Uses max_completion_tokens (required by models like gpt-5) 
+    and includes a basic exception handler for models requiring max_tokens (standard).
+    """
     try:
-        with open('processed/processed_chunks.json', 'r', encoding='utf-8') as f:
-            chunks = json.load(f)
-        
-        # Erstelle Index für schnellere Suche
-        keyword_index = {}
-        url_index = {}
-        
-        for i, chunk in enumerate(chunks):
-            # URL-basierter Index
-            url = chunk['metadata'].get('source', '').lower()
-            if url not in url_index:
-                url_index[url] = []
-            url_index[url].append(i)
-            
-            # Keyword-Index für wichtige Begriffe
-            content = chunk['content'].lower()
-            important_terms = [
-                'fobizz', 'genki', 'innovationsfonds', 'cop', 'cops',
-                'vernetzung', 'workshop', 'weiterbildung', 'kuratiert',
-                'impuls', 'termin', 'anmeldung', 'lunch', 'learn',
-                'impuls-workshop', 'impulsworkshop'  # Zusätzlich für Impuls-Workshops
-            ]
-            
-            for term in important_terms:
-                if term in content:
-                    if term not in keyword_index:
-                        keyword_index[term] = []
-                    keyword_index[term].append(i)
-        
-        return chunks, keyword_index, url_index
+        # 1. Attempt using max_completion_tokens (as requested by your model error)
+        response = openai_client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_prompt}
+            ],
+            max_completion_tokens=max_tokens, 
+            stream=False,
+        )
     except Exception as e:
-        print(f"Error loading data: {e}")
-        return [], {}, {}
+        error_msg = str(e)
+        # Check for the specific unsupported parameter error 
+        if 'unsupported parameter' in error_msg.lower() and 'max_tokens' in error_msg.lower():
+            logger.warning(f"Model {settings.openai_model} rejected max_completion_tokens. Falling back to max_tokens.")
+            # 2. Fallback to max_tokens (standard for most official OpenAI models)
+            try:
+                response = openai_client.chat.completions.create(
+                    model=settings.openai_model,
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_prompt}
+                    ],
+                    max_tokens=max_tokens, 
+                    stream=False,
+                )
+            except Exception as e_fallback:
+                logger.error(f"OpenAI API ERROR (Fallback failed): {repr(e_fallback)}\n{format_exc()}")
+                return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
+        else:
+            # Re-raise if it's a different, unrecoverable error
+            logger.error(f"OpenAI API ERROR (unhandled): {repr(e)}\n{format_exc()}")
+            return "<p>Fehler bei der KI-Antwort. Bitte später erneut versuchen.</p>"
 
-# Global data storage
-CHUNKS, KEYWORD_INDEX, URL_INDEX = load_and_preprocess_data()
+    # Process response
+    result = response.choices[0].message.content.strip()
+    logger.info(f"OpenAI returned: {repr(result)[:400]}")
+    if not result.strip():
+        result = "<p>Leider konnte keine Antwort generiert werden.</p>"
+    return result
 
-class QuestionRequest(BaseModel):
-    question: str
-    language: Optional[str] = "de"
-    max_sources: Optional[int] = 5
 
-class Source(BaseModel):
-    url: str
-    title: str
-    snippet: str
+def summarize_long_text(text, max_length=180):
+    # If short, just return as is
+    if not text or len(text) < 200:
+        return text
+    prompt = f"Fasse den folgenden Text in zwei Sätzen zusammen:\n{text}"
+    try:
+        response = openai_client.chat.completions.create(
+            model=settings.openai_model,
+            messages=[
+                {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+                {"role": "user", "content": prompt}
+            ],
+            max_tokens=max_length,
+            stream=False
+        )
+        summary = response.choices[0].message.content.strip()
+        return summary
+    except Exception as e:
+        logger.error(f"OpenAI Summarization error: {repr(e)}")
+        return text[:max_length]
 
-class AnswerResponse(BaseModel):
-    question: str
-    answer: str
-    sources: List[Source]
+def _event_to_date(e: Dict) -> Optional[datetime]:
+    """
+    Hilfsfunktion für die Workshop-Intentlogik:
+    Nimmt ein Event-Dict (aus der DB oder Live) und gibt ein datetime-Objekt zurück.
+    """
+    if not isinstance(e, dict):
+        return None
 
-def extract_query_intent(query: str) -> Dict[str, any]:
-    """Analysiere die Absicht der Frage"""
-    query_lower = query.lower()
-    
-    intent = {
-        'is_date_query': any(term in query_lower for term in ['heute', 'morgen', 'termin', 'wann', 'datum', 'zeit']),
-        'is_how_to': any(term in query_lower for term in ['wie', 'anleitung', 'tutorial', 'schritte']),
-        'is_definition': any(term in query_lower for term in ['was ist', 'was sind', 'definition', 'bedeutung']),
-        'wants_list': any(term in query_lower for term in ['welche', 'liste', 'alle', 'überblick', 'übersicht']),
-        'wants_contact': any(term in query_lower for term in ['kontakt', 'anmeldung', 'email', 'telefon', 'anmelden']),
-        'topic_keywords': []
-    }
-    
-    # Erweiterte Themenerkennung
-    topics = {
-        'fobizz': ['fobizz', 'to teach', 'to-teach'],
-        'genki': ['genki', 'gen ki', 'gen-ki'],
-        'innovationsfonds': ['innovationsfonds', 'innovation', 'projekt'],
-        'workshop': ['workshop', 'impuls', 'veranstaltung', 'impuls-workshop', 'impulsworkshop'],
-        'cop': ['cop', 'cops', 'community', 'practice'],
-        'weiterbildung': ['weiterbildung', 'fortbildung', 'kurs', 'schulung'],
-        'vernetzung': ['vernetzung', 'netzwerk', 'austausch'],
-        'kuratiert': ['kuratiert', 'kuratiertes', 'sammlung']
-    }
-    
-    for topic, keywords in topics.items():
-        if any(kw in query_lower for kw in keywords):
-            intent['topic_keywords'].append(topic)
-    
-    return intent
+    # Priorität 1: Bereits geparstes Objekt
+    d_obj = e.get("_d")
+    if isinstance(d_obj, datetime):
+        return d_obj
 
-def advanced_search(query: str, max_results: int = 8) -> List[Dict]:
-    """Verbesserte Suche mit Intent-Analyse und Ranking"""
-    intent = extract_query_intent(query)
-    query_lower = query.lower()
-    query_words = set(query_lower.split())
+    # Priorität 2: ISO-String aus der DB
+    d_iso = e.get("date_iso")
+    if d_iso:
+        try:
+            return datetime.fromisoformat(d_iso)
+        except ValueError:
+            pass
+
+    # Priorität 3: Live-Scraping-Text (Fallback)
+    txt = e.get("when") or e.get("title") or ""
+    return parse_de_date(txt)
+
+# --- Date Parsing Helpers ---------------------------------------------------
+# (Diese werden nur noch vom Live-Scraper benötigt)
+
+def coerce_year(y, refyear):
+    if not y: return refyear
+    y = y.strip()
+    if len(y) == 2: y = "20" + y
+    try: return int(y)
+    except Exception: return refyear
+
+def parse_de_date(text: str, ref_date: Optional[datetime] = None) -> Optional[datetime]:
+    if not text: return None
+    t = text.strip()
+    rd = ref_date or datetime.now(timezone.utc)
+    ref_year = rd.year
+
+    m = DMY_DOTTED_RE.search(t)
+    hh, mm = None, None
+    tm = TIME_RE.search(t)
+    if tm: hh, mm = int(tm.group(1)), int(tm.group(2))
+    if m:
+        d = int(m.group(1)); mth = int(m.group(2)); y = coerce_year(m.group(3), ref_year)
+        try:
+            base = datetime(y, mth, d, tzinfo=timezone.utc)
+            if hh is not None: base = base.replace(hour=hh, minute=mm or 0)
+            return base
+        except Exception: pass
+
+    m = DMY_TEXT_RE.search(t)
+    if m:
+        d = int(m.group(1))
+        month_word = (m.group(2) or "").strip().lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue")
+        mth = MONTHS_DE.get(month_word)
+        y = coerce_year(m.group(3), ref_year)
+        if mth:
+            try:
+                base = datetime(y, mth, d, tzinfo=timezone.utc)
+                if hh is not None: base = base.replace(hour=hh, minute=mm or 0)
+                return base
+            except Exception: pass
+    return None
+
+# --- HTML Renderers (Deterministisch) ---------------------------------------
+
+def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Impuls-Workshops") -> str:
+    """
+    Erzeugt eine einfache HTML-Timeline mit Datum + klickbarem Titel.
+    """
+    if not events:
+        html_str = (
+            "<section class='dlh-answer'>"
+            f"<p>Keine {title.replace('(aus KB)', '').replace('(Live)', '').strip()} gefunden.</p>"
+            "<h3>Quellen</h3>"
+            "<ul class='sources'>"
+            f"<li><a href='{IMPULS_URL}' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
+            "</ul></section>"
+        )
+        logger.info(f"Returning answer: {repr(html_str)[:400]}")
+        return html_str
+
+    items_html = []
+    for e in events:
+        d = _event_to_date(e)
+        date_str = d.strftime("%d.%m.%Y") if d else ""
+        t = e.get("title", "Ohne Titel")
+        url = e.get("url") or IMPULS_URL
+        place = e.get("place") or ""
+        meta = f"<div class='meta'>{place}</div>" if place else ""
+        items_html.append(
+            f"<li><time>{date_str}</time> "
+            f"<a href='{url}' target='_blank' rel='noopener noreferrer'>{t}</a>{meta}</li>"
+        )
+
+    # Use title directly from the function argument, which includes (aus KB) or (Live)
+    html_str = (
+        "<section class='dlh-answer'>"
+        f"<p>{title}:</p>"
+        "<ol class='timeline'>" + "".join(items_html) + "</ol>"
+        "<h3>Quellen</h3>"
+        "<ul class='sources'>"
+        f"<li><a href='{IMPULS_URL}' target='_blank'>Impuls-Workshop-Übersicht</a></li>"
+        "</ul></section>"
+    )
+    logger.info(f"Returning answer: {repr(html_str)[:400]}")
+    return html_str
+
+
+def render_structured_cards_html(items: List[Dict], title: str, source_url: str) -> str:
+    """
+    Generiert die HTML-Struktur für Projekte/Angebote (Karten-Layout) aus Python-Daten.
+    """
+    if not items:
+        return f"<p>Leider wurden keine passenden {title.replace('(aus KB)', '').strip()} gefunden.</p>"
+
+    cards_html = []
+    for item in items:
+        # Ensure title and URL exist and create summary from content if available
+        item_title = item.get("title", "Unbekanntes Element")
+        item_url = item.get("url", "#")
+        item_desc = item.get("description") or item.get("content", "")
+        
+        # Use existing summary if available, otherwise generate one
+        item_snippet = item.get("snippet") or summarize_long_text(item_desc) 
+        
+        cards_html.append(
+            f"<article class='card'>"
+            f"<h4><a href='{item_url}' target='_blank'>{item_title}</a></h4>"
+            f"<p>{item_snippet}</p>"
+            f"</article>"
+        )
+
+    html_str = (
+        f"<section class='dlh-answer'>"
+        f"<p>{title} (aus KB):</p>"
+        f"<div class='cards'>" + "".join(cards_html) + "</div>"
+        f"<h3>Quellen</h3>"
+        f"<ul class='sources'>"
+        f"<li><a href='{source_url}' target='_blank'>DLH Wissensbasis</a></li>"
+        "</ul></section>"
+    )
+    return html_str
+
+# --- Knowledge Base Loading (Structured and Unstructured) -------------------
+
+def load_chunks(path: str) -> List[Dict]:
+    """Load the (unstructured) knowledge base .json or .jsonl robustly."""
+    out = []
+    p = Path(path)
+    if not p.exists():
+        logger.warning(f"⚠️ Unstrukturierte KB nicht gefunden: {p.resolve()}")
+        return []
     
-    results = []
+    # (Behält die .jsonl-Logik bei, falls Sie sie später verwenden)
+    if p.suffix == ".jsonl":
+        with p.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line: continue
+                try: out.append(json.loads(line))
+                except Exception: logger.debug(f"Skipping invalid JSON line in {path}")
+        return out
+    else:
+        try:
+            return json.load(p.open("r", encoding="utf-8"))
+        except Exception as e:
+            logger.error(f"Failed to load chunks from {path}: {e}")
+            return []
+
+def load_structured_db(path: str) -> Dict:
+    """Lädt die neue, vorverarbeitete strukturierte Datenbank."""
+    p = Path(path)
+    if not p.exists():
+        logger.warning(f"⚠️ Strukturierte DB NICHT GEFUNDEN: {path}. Antworten für Listen werden fehlschlagen.")
+        return {}
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            # Wichtig: Datums-Strings in echten datetime-Objekte umwandeln
+            if "workshops_kb" in data:
+                for event in data["workshops_kb"]:
+                    try:
+                        # Stellt sicher, dass das _d-Feld für die Sortierung existiert
+                        event["_d"] = datetime.fromisoformat(event["date_iso"])
+                    except (ValueError, TypeError):
+                        event["_d"] = None # Fallback
+            logger.info(f"✅ Strukturierte DB geladen ({path})")
+            return data
+    except Exception as e:
+        logger.error(f"Fehler beim Laden der strukturierten DB: {e}")
+        return {}
+
+# Load chunks (für RAG-Fallback)
+CHUNKS: List[Dict] = load_chunks(CHUNKS_PATH)
+CHUNKS_COUNT = len(CHUNKS)
+logger.info(f"✅ {CHUNKS_COUNT} Chunks (für RAG) geladen von {CHUNKS_PATH}")
+
+# Load structured DB (für deterministische Antworten)
+STRUCTURED_DB: Dict = load_structured_db(STRUCTURED_DB_PATH)
+
+
+# --- RAG Fallback Functions (Keyword Search & Prompting) ----------------
+
+def index_chunks_by_keywords(chunks):
+    keywordindex = {}
+    for i, ch in enumerate(chunks):
+        keywords = ch.get("keywords", [])
+        for kw in keywords:
+            keywordindex.setdefault(kw.lower(), set()).add(i)
+    return keywordindex
+
+KEYWORDINDEX = index_chunks_by_keywords(CHUNKS)
+
+def extract_terms(query: str) -> Set[str]:
+    """Simple term extraction for keyword indexing."""
+    query = query.lower()
+    tokens = re.split(r"[^a-zäöüß0-9]+", query)
+    return {t for t in tokens if len(t) > 2 and t not in ["der", "die", "das", "und", "oder"]}
+
+def advanced_search(query, max_items=12):
+    # Score chunks based on query tokens
+    tokens = set(extract_terms(query))
+    if not tokens:
+        return []
+    hits = Counter()
+    for token in tokens:
+        for idx in KEYWORDINDEX.get(token, []):
+            hits[idx] += 1
+    best_idxs = [idx for idx, _ in hits.most_common(max_items)]
+    results = [CHUNKS[idx] for idx in best_idxs]
+    logger.info(f"Advanced search (RAG) for '{query}': {len(results)} hits")
+    return results
+
+def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
+    """Wrapper für die advanced_search, da Sitemap-Logik nicht verwendet wird."""
+    # (Sitemap-Funktionen werden beibehalten, falls sie in Zukunft benötigt werden)
+    return advanced_search(query, max_items=max_items)
+
+# --- Sitemap handling (Wird geladen, aber nicht aktiv für die Suche genutzt) ---
+
+SITEMAP_URLS: List[str] = []
+SITEMAP_SECTIONS: Dict[str, List[str]] = {}
+SITEMAP_LOADED = False
+
+def load_sitemap_local(path: str = "processed/dlh_sitemap.xml") -> Dict[str, int]:
+    """
+    Loads a standard XML sitemap, builds URL index/buckets.
+    """
+    global SITEMAP_URLS, SITEMAP_SECTIONS, SITEMAP_LOADED
+    from xml.etree import ElementTree as ET
+    stats = {"urls": 0, "sections": 0, "ok": 0}
+    try:
+        p = Path(path)
+        if not p.exists():
+            logger.warning(f"Sitemap not found at {path}")
+            return stats
+        tree = ET.parse(str(p)) 
+        root = tree.getroot()
+        ns = {"sm": "http://www.sitemaps.org/schemas/sitemap/0.9"}
+        urls = []
+        for u in root.findall("sm:url", ns):
+            loc = u.findtext("sm:loc", default="", namespaces=ns).strip()
+            if loc:
+                urls.append(loc)
+        buckets = {}
+        KEYS = [
+            "impuls-workshops", "innovationsfonds", "genki", "vernetzung",
+            "weiterbildung", "kuratiertes", "cops", "wb-kompass", "fobizz", "schulalltag"
+        ]
+        for url in urls:
+            path = urllib.parse.urlparse(url).path.lower()
+            for k in KEYS:
+                if f"/{k}" in path:
+                    buckets.setdefault(k, []).append(url)
+        SITEMAP_URLS = urls
+        SITEMAP_SECTIONS = buckets
+        SITEMAP_LOADED = True
+        stats.update(urls=len(urls), sections=len(buckets), ok=1)
+        logger.info(f"Sitemap loaded with {len(urls)} URLs, {len(buckets)} buckets")
+        return stats
+    except Exception as e:
+        logger.error(f"WARN sitemap load failed: {repr(e)}")
+        return stats
+
+SITEMAP_STATS = load_sitemap_local()
+
+# --- Live Web Scraping (Nur als Fallback für Workshops) --------------------
+
+def fetch_live_impuls_workshops() -> List[Dict]:
+    """
+    Liefert eine Liste von Workshops durch Live-Scraping.
+    """
+    events: List[Dict] = []
+    try:
+        r = requests.get(
+            IMPULS_URL,
+            timeout=15,
+            headers={"User-Agent": "DLH-Bot/1.0"},
+        )
+        r.raise_for_status()
+        html = r.text
+    except Exception as ex:
+        print("LIVE FETCH ERROR (Impuls: HTTP):", repr(ex))
+        return []
+
+    try:
+        soup = BeautifulSoup(html, "html.parser")
+        for sel in ["script", "style", "noscript", ".cookie", ".consent", ".banner"]:
+            for el in soup.select(sel):
+                el.decompose()
+        root = soup.select_one("main") or soup
+        
+        for a in root.select("li a[href], div a[href]"):
+            parent = a.find_parent(["li", "div"])
+            date_str = ""
+            time_el = a.find_previous_sibling("time") or (parent and parent.find("time"))
+            if time_el:
+                date_str = time_el.get_text(" ", strip=True)
+            
+            if not date_str and parent:
+                date_candidates = parent.select("span.date, div.date, time") 
+                date_str = " ".join([d.get_text(" ", strip=True) for d in date_candidates])
+            
+            if not date_str:
+                date_str = parent.get_text(" ", strip=True)
+                
+            dt = parse_de_date(date_str)
+            title = a.get_text(" ", strip=True) if a else ""
+            href = a.get("href") if a and a.has_attr("href") else ""
+
+            if href and href.startswith("/"):
+                href = urllib.parse.urljoin(IMPULS_URL, href)
+
+            if dt and title and href:
+                events.append({"date": dt, "title": title, "url": href or IMPULS_URL})
+        
+        seen = set()
+        cleaned: List[Dict] = []
+        for e in events:
+            d_val = e.get("date")
+            if not d_val: continue
+            key = (d_val.isoformat(), e["title"])
+            if key in seen: continue
+            seen.add(key)
+            cleaned.append(e)
+
+        print(f"LIVE FETCH SUCCESS (Impuls): parsed {len(cleaned)} events (raw {len(events)})")
+        return cleaned
+
+    except Exception as ex:
+        print("LIVE FETCH ERROR (Impuls: parse):", repr(ex))
+        return []
+
+# --- LLM Prompt Building (Nur für RAG-Fallback) -----------------------------
+
+def build_system_prompt() -> str:
+    # (Behält den strengen Prompt für den Fallback bei)
+    return (
+        "Du bist ein kompetenter KI-Chatbot, der Fragen rund um die DLH-Webseite dlz.zh.ch, Impuls-Workshops, Innovationsfonds-Projekte, Weiterbildungen und verwandte Bildungsthemen beantwortet. "
+        "Deine Antwort **MUSS prägnant und auf Deutsch** sein. Nutze den bereitgestellten **Kontext (Chunks)** als primäre Wissensbasis. "
+        "Wenn du eine Antwort aus dem Kontext generierst, **MUSST du die Quellen nennen und verlinken**. "
+        "**WENN** die Frage eine Liste von Terminen, Workshops, Projekten oder Artikeln erfordert, **DANN MUSST DU** die Antwort unter Verwendung des entsprechenden HTML-Muster erzeugen, um die Links klickbar zu machen. Wenn die gesuchten Informationen fehlen, **antworte höflich, aber OHNE HTML-Struktur**.\n\n"
+        "**HTML-Muster für Termine/Workshops (Timeline):**\n"
+        "<section class='dlh-answer'>\n"
+        "<p>Deine kurze Einleitung (1-2 Sätze, z.B. 'Hier sind die kommenden Workshops:').</p>\n"
+        "<ol class='timeline'>\n"
+        "<li><time>2025-11-11</time> <a href='URL' target='_blank'>Titel des Workshops</a>"
+        "<div class='meta'>Ort/Format (falls bekannt)</div></li>\n"
+        "</ol>\n"
+        "<h3>Quellen</h3>\n"
+        "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
+        "</section>\n\n"
+        "**HTML-Muster für Projekte/Artikel (Karten):**\n"
+        "<section class='dlh-answer'>\n"
+        "<p>Deine kurze Einleitung (1-2 Sätze, z.B. 'Der Innovationsfonds unterstützt folgende Projekte:').</p>\n"
+        "<div class='cards'>\n"
+        "<article class='card'>\n"
+        "<h4><a href='URL' target='_blank'>Projekttitel</a></h4>\n"
+        "<p>Kurze Beschreibung (1–2 Sätze).</p>\n"
+        "</article>\n"
+        "</div>\n"
+        "<h3>Quellen</h3>\n"
+        "<ul class='sources'><li><a href='URL' target='_blank'>Titel oder Domain</a></li></ul>\n"
+        "</section>"
+    )
+
+def build_user_prompt(query: str, ranked: List[Dict]) -> str:
+    """
+    Builds user prompt including context from search results.
+    Prioritizes 'content' over 'snippet' for rich context.
+    """
+    source_snips = []
+    for ch in ranked:
+        raw_text = ch.get("content") or ch.get("snippet") or "" 
+        snippet = safe_snippet(raw_text, MAX_SNIPPET_CHARS) 
+        url = ch.get("url", "")
+        title = ch.get("title", "Quelle") 
+        if snippet:
+            source_snips.append(f"Quelle: {title} (URL: {url})\n{snippet}")
+            
+    context = "\n---\n".join(source_snips)
+    return f"Frage: {query.strip()}\nKontext zur Beantwortung (verwende diese Informationen, um die Antwort zu generieren, AUCH um HTML-Links zu erstellen):\n{context}" if context else query.strip()
+
+def build_sources(ranked: List[Dict], limit: int = 4):
+    """Extracts and formats sources for AnswerResponse."""
+    out = []
+    seen = set() 
+    for ch in ranked[:limit]:
+        title = ch.get("title", "(Quelle)")
+        url = ch.get("url", "")
+        key = (title, url)
+        if key not in seen:
+            raw_text = ch.get('snippet') or ch.get('content', '')
+            snippet = summarize_long_text(raw_text)
+            out.append(SourceItem(title=title, url=url, snippet=snippet))
+            seen.add(key)
+    return out
+
+
+def ensure_clickable_links(answer_html: str) -> str:
+    """Ensure all links in LLM output are clickable (basic HTML patch, expand as needed)."""
+    if not answer_html:
+        return ""
+    return re.sub(
+        r'\b(https?://[a-zA-Z0-9_\-./?=#%&]+)\b',
+        r'<a href="\1" target="_blank">\1</a>',
+        answer_html,
+        flags=re.IGNORECASE,
+    )
+
+# --- Main API Endpoint (Neue Logik) ------------------------------------------------------
+
+@app.post("/ask", response_model=AnswerResponse)
+def ask(req: QuestionRequest):
+    try:
+        q_low = (req.question or "").lower()
+        
+        # ---- 1. DETERMINISTISCHER HANDLER (NEU) ----
+        # (Verwendet die geladene STRUCTURED_DB)
+
+        # KORREKTUR: Robuste Prüfung, ob die DB ein Dictionary ist, bevor wir .get() verwenden
+        if not isinstance(STRUCTURED_DB, dict):
+            logger.error("STRUCTURED_DB ist keine Dict. Ladefehler? Fallback zu RAG.")
+            # Springe direkt zum RAG-Fallback, wenn die DB kaputt ist
+            return rag_fallback(req, q_low)
+
+        # 1a. Innovationsfonds Projects (Direct Python Rendering)
+        if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
+            projects = STRUCTURED_DB.get("innovationsfonds_projects", [])
+            if projects:
+                html_answer = render_structured_cards_html(
+                    projects, 
+                    title="DLH Innovationsfonds Projekte", 
+                    source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
+                )
+                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects[:req.max_sources or 4]]
+                return AnswerResponse(
+                    answer=html_answer,
+                    sources=returned_sources
+                )
+        
+        # 1b. Fobizz Resources (Direct Python Rendering)
+        if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
+            fobizz_items = STRUCTURED_DB.get("fobizz_resources", [])
+            if fobizz_items:
+                html_answer = render_structured_cards_html(
+                    fobizz_items, 
+                    title="DLH Fobizz Angebote", 
+                    source_url="https://dlh.zh.ch/home/wb-kompass/wb-angebote/1007-wb-plattformen"
+                )
+                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in fobizz_items[:req.max_sources or 4]]
+                return AnswerResponse(
+                    answer=html_answer,
+                    sources=returned_sources
+                )
+
+        # 1c. WORKSHOP INTENT (Time-sensitive, aus DB)
+        if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
+            
+            def _norm(s: str) -> str:
+                return (s.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
+            qn = _norm(req.question or "")
+            want_past = any(k in qn for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"])
+            want_next = any(k in qn for k in ["naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes"])
+            yr = None
+            m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
+            if m:
+                try: yr = int(m.group(1))
+                except ValueError: yr = None
+            
+            # --- CHUNK ANALYSIS (aus STRUCTURED_DB) ---
+            all_events = STRUCTURED_DB.get("workshops_kb", [])
+            
+            if all_events:
+                today = datetime.now(timezone.utc).date()
+                # Filtern der Events (benötigt _d, das beim Laden der DB erstellt wurde)
+                future_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() >= today]
+                past_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() < today]
+
+                print(f"Y Chunks found: future={len(future_chunk_events)}, past={len(past_chunk_events)}")
+                
+                if want_next:
+                    events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])[:1]
+                    title_suffix = " (aus KB)"
+                elif want_past:
+                    if yr: past_chunk_events = [e for e in past_chunk_events if e["_d"].year == yr]
+                    events_to_show = sorted(past_chunk_events, key=lambda x: x["_d"], reverse=True)
+                    title_suffix = " (aus KB)" + (f" {yr}" if yr else "")
+                else: # Default: all future events from chunks
+                    events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])
+                    title_suffix = " (aus KB)"
+                    
+                html = render_workshops_timeline_html(
+                    events_to_show, 
+                    title=("Nächster Impuls-Workshop" if want_next else "Kommende Impuls-Workshops") + title_suffix
+                )
+
+                return AnswerResponse(
+                    answer=html,
+                    sources=[SourceItem(title=e['title'], url=e['url']) for e in events_to_show if 'title' in e and 'url' in e] 
+                )
+
+            # 4. Fallback to LIVE SCRAPER if DB is empty
+            
+            events = fetch_live_impuls_workshops()
+            norm_events = []
+            for e in events:
+                d = _event_to_date(e)
+                if d: ee = dict(e); ee["_d"] = d; norm_events.append(ee)
+
+            today = datetime.now(timezone.utc).date()
+            future = [e for e in norm_events if e["_d"].date() >= today]
+            past = [e for e in norm_events if e["_d"].date() < today]
+
+            if want_next:
+                future_sorted = sorted(future, key=lambda x: x["_d"])
+                events_to_show = future_sorted[:1]
+                html = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop (Live)")
+            elif want_past:
+                if yr: past = [e for e in past if e["_d"].year == yr]
+                past_sorted = sorted(past, key=lambda x: x["_d"], reverse=True)
+                html = render_workshops_timeline_html(past_sorted, title="Vergangene Impuls-Workshops (Live)" + (f" {yr}" if yr else ""))
+            else:
+                future_sorted = sorted(future, key=lambda x: x["_d"])
+                html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops (Live)")
+            
+            return AnswerResponse(answer=html, sources=[SourceItem(title="Impuls-Workshop-Übersicht", url=IMPULS_URL)])
+            
+
+        # ---- 3. DEFAULT LLM/RAG BRANCH (General Concepts, Definitions, etc.) ----
+        return rag_fallback(req, q_low)
+
+    except Exception as e:
+        msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
+        logger.error(f"ERROR /ask: %s\n{format_exc()}", repr(e))
+        logger.info(f"Returning answer: {repr(msg)[:400]}")
+        return AnswerResponse(answer=msg, sources=[])
+
+def rag_fallback(req: QuestionRequest, q_low: str):
+    """
+    Diese Funktion wird aufgerufen, wenn keine der deterministischen Regeln zutrifft.
+    Sie verwendet die RAG-Pipeline (Chunks + LLM), um eine Antwort auf Freitextfragen zu generieren.
+    """
+    logger.info(f"Kein strukturierter Handler für '{q_low}'. Fallback zu RAG/LLM.")
     
-    # Spezialbehandlung für Impuls-Workshops
-    if 'impuls' in query_lower and 'workshop' in query_lower:
-        intent['topic_keywords'].append('impulsworkshop')
+    # Führe die RAG-Suche (advanced_search) nur aus, wenn sie benötigt wird
+    ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 4)
     
-    # 1. Direkte URL-Treffer haben höchste Priorität
-    for topic in intent['topic_keywords']:
-        for url, indices in URL_INDEX.items():
-            if topic in url:
-                for idx in indices[:3]:  # Top 3 von jeder passenden URL
-                    if idx < len(CHUNKS):
-                        results.append((100, CHUNKS[idx]))
+    system_prompt = build_system_prompt()
+    user_prompt = build_user_prompt(req.question, ranked)
+    answer_html = call_openai(system_prompt, user_prompt, max_tokens=1200)
+    answer_html = ensure_clickable_links(answer_html)
     
-    # 2. Keyword-Index-Suche
-    for topic in intent['topic_keywords']:
-        if topic in KEYWORD_INDEX:
-            for idx in KEYWORD_INDEX[topic][:5]:  # Top 5 pro Keyword
-                if idx < len(CHUNKS):
-                    chunk = CHUNKS[idx]
-                    if not any(r[1] == chunk for r in results):  # Keine Duplikate
-                        results.append((80, chunk))
+    # Quellenliste für die AnswerResponse erzeugen
+    sources = build_sources(ranked, limit=req.max_sources or 4)
     
-    # 3. Erweiterte Textsuche mit Scoring
-    for i, chunk in enumerate(CHUNKS):
-        if len(results) > max_results * 2:  # Früh abbrechen wenn genug
+    if not answer_html.strip():
+            answer_html = "<p>Leider konnte keine Antwort generiert werden.</p>" # Fallback
+            
+    logger.info(f"Returning answer: {repr(answer_html)[:400]}")
+    response = AnswerResponse(answer=answer_html, sources=sources)
+    return response
+
+# --- Debug and Info Endpoints (Restored from original file) ---
+
+def validate_prompts():
+    try:
+        prompts = []
+        for ch in CHUNKS[:2]: # Verwendet die RAG-Chunks
+            sys = build_system_prompt()
+            user = build_user_prompt("Testfrage", [ch])
+            prompts.append({"sys": sys, "user": user})
+        logger.info("Prompt validation success")
+        return {"ok": True, "prompt_count": len(prompts)}
+    except Exception as e:
+        logger.warning("Prompt validation failed: %s", repr(e))
+        return {"ok": False, "error": str(e)}
+
+@app.get("/debug/validate")
+def debug_validate_endpoint():
+    return validate_prompts()
+
+# (Definiere SUBJECTINDEX global, damit es in der FAQ-Funktion verwendet werden kann)
+def index_chunks_by_subject(chunks):
+    idx = defaultdict(list)
+    for i, ch in enumerate(chunks):
+        subject = ch.get("subject")
+        if subject:
+            idx[subject.lower()].append(i)
+    return idx
+SUBJECTINDEX = index_chunks_by_subject(CHUNKS)
+
+
+@app.get("/debug/faq/{subject}")
+def debug_faq(subject: str):
+    
+    def get_subject_faq(subject, max_items=10):
+        idxs = SUBJECTINDEX.get(subject.lower(), [])
+        return [CHUNKS[i] for i in idxs][:max_items]
+
+    faqs = get_subject_faq(subject)
+    arts = []
+    for faq in faqs:
+        title = faq.get("title", "(keine Überschrift)")
+        url = faq.get("url", "#")
+        snippet = faq.get("snippet", "")
+        arts.append(f"<article><h4><a href='{url}' target='_blank'>{title}</a></h4><p>{snippet}</p></article>")
+        
+        max_length = 1200 # Standardwert definieren
+        if sum(len(a) for a in arts) > max_length:
             break
             
-        content_lower = chunk['content'].lower()
-        score = 0
-        
-        # Exakte Phrasen-Matches (sehr wichtig!)
-        if len(query_words) > 1:
-            # 2-Wort-Phrasen
-            words_list = query_lower.split()
-            for j in range(len(words_list) - 1):
-                phrase = f"{words_list[j]} {words_list[j+1]}"
-                if phrase in content_lower:
-                    score += 25  # Erhöht von 20
-        
-        # Wort-für-Wort Scoring
-        content_words = set(content_lower.split())
-        matching_words = query_words & content_words
-        score += len(matching_words) * 5
-        
-        # Intent-basiertes Scoring
-        if intent['is_date_query'] and any(d in content_lower for d in ['2024', '2025', 'uhr', 'datum', 'termin']):
-            score += 20  # Erhöht von 15
-        
-        if intent['wants_contact'] and any(c in content_lower for c in ['anmeldung', '@', 'email', 'telefon', 'formular']):
-            score += 20
-            
-        if intent['wants_list'] and (content_lower.count('•') > 2 or content_lower.count('\n') > 5):
-            score += 15
-        
-        # Titel-Bonus
-        if 'title' in chunk['metadata']:
-            title_lower = chunk['metadata']['title'].lower()
-            if any(word in title_lower for word in query_words if len(word) > 3):
-                score += 30  # Erhöht von 25
-        
-        if score > 10 and not any(r[1] == chunk for r in results):
-            results.append((score, chunk))
-    
-    # Sortiere nach Score
-    results.sort(key=lambda x: x[0], reverse=True)
-    
-    # Diversifiziere Ergebnisse - nicht zu viele von der gleichen URL
-    final_results = []
-    url_count = Counter()
-    
-    for score, chunk in results:
-        url = chunk['metadata'].get('source', '')
-        if url_count[url] < 3:  # Max 3 Chunks pro URL
-            final_results.append(chunk)
-            url_count[url] += 1
-            
-        if len(final_results) >= max_results:
-            break
-    
-    return final_results
+    html = "<div class='faq-list'>" + "\n".join(filter(None, ensure_list(arts))) + "</div>" if arts else "<p>Keine FAQs gefunden.</p>"
+    return {"subject": subject, "html": html}
 
-def create_enhanced_prompt(question: str, chunks: List[Dict], intent: Dict) -> str:
-    """Erstelle einen optimierten Prompt basierend auf Intent und mit HTML-Formatierung"""
-    
-    # Gruppiere Chunks nach URL für bessere Übersicht
-    chunks_by_url = {}
-    for chunk in chunks:
-        url = chunk['metadata'].get('source', 'Unbekannt')
-        if url not in chunks_by_url:
-            chunks_by_url[url] = []
-        chunks_by_url[url].append(chunk['content'])
-    
-    # Erstelle strukturierten Kontext
-    context_parts = []
-    for url, contents in chunks_by_url.items():
-        context_parts.append(f"=== Quelle: {url} ===")
-        for content in contents:
-            context_parts.append(content)
-        context_parts.append("")
-    
-    context = "\n\n".join(context_parts)
-    
-    # Intent-spezifische Anweisungen
-    intent_instructions = ""
-    
-    if intent['is_date_query']:
-        intent_instructions += """
-TERMINE UND DATEN:
-- Heutiges Datum: {date}
-- Liste ALLE gefundenen Termine chronologisch auf
-- Verwende das Format: <br>• <strong>Datum (Wochentag)</strong> - Zeit - Veranstaltung
-- Hebe vergangene Termine als "bereits vorbei" hervor
-- Zeige IMMER die Anmeldelinks wenn vorhanden
-""".format(date=datetime.now().strftime('%d.%m.%Y'))
-    
-    if intent['wants_list']:
-        intent_instructions += """
-LISTEN UND ÜBERSICHTEN:
-- Erstelle eine vollständige, strukturierte Liste
-- Verwende klare Kategorien mit <strong>Überschriften</strong>
-- Nutze <br>• für Aufzählungspunkte
-- Zeige ALLE gefundenen Elemente, nicht nur Beispiele
-"""
-    
-    if intent['wants_contact']:
-        intent_instructions += """
-KONTAKT UND ANMELDUNG:
-- Gib ALLE gefundenen Kontaktinformationen an
-- Mache Links klickbar: <a href="URL" target="_blank">Linktext</a>
-- Betone wichtige Informationen wie Anmeldefristen
-- Zeige E-Mail-Adressen und Telefonnummern deutlich
-"""
-    
-    prompt = f"""Du bist der offizielle KI-Assistent des Digital Learning Hub (DLH) Zürich.
-Beantworte die folgende Frage präzise und vollständig basierend auf den bereitgestellten Informationen.
+@app.get("/debug/chunks_by_tag/{tag}")
+def debug_chunks_by_tag(tag: str):
+    def get_chunks_by_tag(tag):
+        tag_lower = tag.lower()
+        return [ch for ch in CHUNKS if tag_lower in str(ch.get("tags", [])).lower()]
+    return {"tag": tag, "chunks": get_chunks_by_tag(tag)}
 
-WICHTIGE REGELN:
-1. Verwende NUR Informationen aus dem bereitgestellten Kontext
-2. Sei spezifisch und vollständig - liste ALLE relevanten Informationen auf
-3. Wenn etwas nicht im Kontext steht, sage das klar
-4. Verweise bei Bedarf auf die DLH-Website für weitere Informationen
-5. Bei Anmeldelinks: IMMER als klickbare Links formatieren
+@app.get("/debug/sitemap")
+def debug_sitemap():
+    return {
+        "loaded": SITEMAP_LOADED,
+        "urls": len(SITEMAP_URLS),
+        "sections": {k: len(v) for k, v in SITEMAP_SECTIONS.items()}
+    }
 
-FORMATIERUNG (SEHR WICHTIG für HTML-Darstellung):
-- Verwende KEINE Markdown-Zeichen (*, #, _, -)
-- Verwende <br><br> für Absätze zwischen Abschnitten
-- Verwende <br> für Zeilenumbrüche innerhalb von Listen
-- Verwende <strong>Text</strong> für Überschriften
-- Strukturiere Listen mit <br>• für jeden Punkt
-- Mache URLs klickbar: <a href="URL" target="_blank">Linktext</a>
-- E-Mails: <a href="mailto:email@domain.ch">email@domain.ch</a>
+@app.get("/_kb")
+def kb_info():
+    return {
+        "ok": True, 
+        "chunks_loaded": CHUNKS_COUNT, 
+        "path": str(settings.chunks_path),
+        "structured_db_loaded": bool(STRUCTURED_DB)
+    }
 
-Beispiel für gute Formatierung:
-<strong>Überschrift</strong><br><br>
-Hier ist der einführende Text für diesen Abschnitt.<br><br>
-<strong>Wichtige Punkte</strong><br>
-• Erster wichtiger Punkt<br>
-• Zweiter wichtiger Punkt<br>
-• Dritter wichtiger Punkt<br><br>
-<strong>Termine</strong><br>
-• <strong>19.11.2025:</strong> 12:15 - 13:00 Uhr - Lunch & Learn<br>
-• <strong>26.11.2025:</strong> 09:00 - 10:00 Uhr - Sprechstunde<br><br>
-<strong>Anmeldung</strong><br>
-<a href="https://anmeldelink.ch" target="_blank">Hier zur Anmeldung</a>
-
-{intent_instructions}
-
-KONTEXT AUS DER DLH-WEBSITE:
-{context}
-
-FRAGE: {question}
-
-Erstelle eine hilfreiche, gut strukturierte und vollständige Antwort:"""
-    
-    return prompt
+@app.get("/debug/impuls")
+def debug_impuls():
+    ev = fetch_live_impuls_workshops()
+    return {
+        "count": len(ev),
+        "events": [
+            {
+                "date": _event_to_date(e).isoformat() if _event_to_date(e) else None,
+                "title": e.get("title"),
+                "url": e.get("url"),
+            }
+            for e in ev[:10]
+        ],
+    }
 
 @app.get("/")
-async def root():
+def root():
     return {
-        "message": "DLH Chatbot API (Ultimate)",
-        "status": "running",
-        "chunks_loaded": len(CHUNKS),
-        "indexed_keywords": len(KEYWORD_INDEX)
+        "ok": True,
+        "service": "DLH OpenAI API",
+        "endpoints": ["/health", "/ask", "/version", "/debug/deps", "/debug/impuls", "/debug/validate", "/debug/sitemap", "/_kb"]
     }
 
 @app.get("/health")
-async def health_check():
+def health():
+    # Prüft auch, ob die strukturierte DB geladen wurde
+    db_loaded = bool(STRUCTURED_DB)
+    db_status = "OK"
+    if not db_loaded:
+        db_status = "FEHLER: structured_db.json nicht gefunden oder leer."
+    
     return {
         "status": "healthy",
-        "chunks_loaded": len(CHUNKS),
-        "api_key_configured": bool(os.getenv("ANTHROPIC_API_KEY")),
-        "indexed_keywords": len(KEYWORD_INDEX)
+        "chunks_loaded (RAG)": CHUNKS_COUNT,
+        "structured_db_status": db_status,
+        "model": settings.openai_model
     }
 
-@app.post("/ask", response_model=AnswerResponse)
-async def ask_question(request: QuestionRequest):
-    """Beantworte Fragen mit optimaler Kontext-Verarbeitung"""
-    try:
-        # Analysiere Intent
-        intent = extract_query_intent(request.question)
-        
-        # Führe erweiterte Suche durch
-        relevant_chunks = advanced_search(
-            request.question, 
-            max_results=request.max_sources + 3
-        )
-        
-        # Erstelle optimierten Prompt
-        prompt = create_enhanced_prompt(request.question, relevant_chunks, intent)
-        
-        # Get response from Claude
-        try:
-            response = anthropic_client.messages.create(
-                model="claude-sonnet-4-20250514",  # Neuestes Modell
-                max_tokens=1500,  # Mehr Tokens für ausführlichere Antworten
-                temperature=0.3,
-                messages=[{
-                    "role": "user",
-                    "content": prompt
-                }]
-            )
-            
-            answer = response.content[0].text
-            
-        except Exception as claude_error:
-            print(f"🔴 Claude API Error: {claude_error}")
-            print(f"🔑 API Key present: {bool(os.getenv('ANTHROPIC_API_KEY'))}")
-            print(f"🔑 API Key starts with: {os.getenv('ANTHROPIC_API_KEY', 'NOT_SET')[:10]}...")
-            
-            # Besserer Fallback mit HTML-Formatierung
-            answer = "<strong>Entschuldigung, ich kann gerade nicht auf die KI zugreifen.</strong><br><br>"
-            answer += f"Hier sind relevante Informationen zu Ihrer Frage '{request.question}':<br><br>"
-            
-            for i, chunk in enumerate(relevant_chunks[:3]):
-                title = chunk['metadata'].get('title', 'Information')
-                content = chunk['content'][:400]
-                # Füge Zeilenumbrüche für bessere Lesbarkeit hinzu
-                content = content.replace('\n', '<br>')
-                answer += f"<strong>{title}:</strong><br>{content}...<br><br>"
-        
-        # Format sources
-        sources = []
-        seen_urls = set()
-        for chunk in relevant_chunks[:request.max_sources]:
-            url = chunk['metadata']['source']
-            if url not in seen_urls:
-                sources.append(Source(
-                    url=url,
-                    title=chunk['metadata'].get('title', 'DLH Seite'),
-                    snippet=chunk['content'][:150] + "..."
-                ))
-                seen_urls.add(url)
-        
-        return AnswerResponse(
-            question=request.question,
-            answer=answer,
-            sources=sources
-        )
-        
-    except Exception as e:
-        print(f"Error: {str(e)}")
-        # Besserer Fehler-Fallback
-        if relevant_chunks:
-            fallback_answer = f"<strong>Ein Fehler ist aufgetreten.</strong><br><br>Basierend auf den Informationen von dlh.zh.ch:<br><br>{relevant_chunks[0]['content'][:300]}..."
-            sources = [Source(
-                url=relevant_chunks[0]['metadata']['source'],
-                title=relevant_chunks[0]['metadata']['title'],
-                snippet=relevant_chunks[0]['content'][:150] + "..."
-            )]
-            return AnswerResponse(
-                question=request.question,
-                answer=fallback_answer,
-                sources=sources
-            )
-        else:
-            raise HTTPException(status_code=500, detail=str(e))
+@app.get("/version")
+def version():
+    return {
+        "version": "openai-backend",
+        "model": settings.openai_model,
+    }
 
+@app.get("/debug/deps")
+def debug_deps():
+    import platform
+    import openai as _openai_pkg
+    import bs4 as _bs4_pkg
+    versions = {
+        "python": platform.python_version(),
+        "openai": getattr(_openai_pkg, "__version__", "?"),
+        "bs4": getattr(_bs4_pkg, "__version__", "?"),
+    }
+    logger.info(f"Dependency versions: {versions}")
+    return versions
 
 if __name__ == "__main__":
-    print("\n🚀 Starting Ultimate DLH Chatbot API server...")
-    print("📝 API documentation: http://localhost:8000/docs")
-    print("🌐 Chat interface: http://localhost:8000/static/index.html")
-    print(f"📚 Loaded {len(CHUNKS)} chunks")
-    print(f"🔍 Indexed {len(KEYWORD_INDEX)} keywords")
-    print("\n✅ All features enabled!\n")
-    
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    import uvicorn
+    # uvicorn.run("ultimate_api:app", host="0.0.0.0", port=8000)
+    pass
