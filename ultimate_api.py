@@ -27,14 +27,12 @@ class Settings(BaseSettings):
     """
     openai_apikey: str
     openai_model: str 
-    # Pfad zur RAG-Fallback-Datei (6000+ Chunks)
     chunks_path: str = "processed/processed_chunks.json" 
-    # Pfad zur neuen, sauberen Datenbank (91 Projekte, etc.)
     structured_db_path: str = "processed/structured_db.json" 
 
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
-STRUCTURED_DB_PATH = settings.structured_db_path # NEU
+STRUCTURED_DB_PATH = settings.structured_db_path 
 
 PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 MAX_HITS_IN_PROMPT = 12
@@ -81,6 +79,30 @@ MONTHS_DE = {
     "september": 9, "okt": 10, "oktober": 10, "nov": 11, "november": 11,
     "dez": 12, "dezember": 12,
 }
+
+# --- NEU: SUBJECT MAP (Für Innovationsfonds-Filterung) ---
+SUBJECT_MAP = {
+    'abu': 'ABU', 'architektur': 'Architektur EFZ', 'automobilberufe': 'Automobilberufe',
+    'berufskunde': 'Berufskunde', 'bildnerisches-gestalten': 'Bildnerisches Gestalten',
+    'biologie': 'Biologie', 'brueckenangebot': 'Bruckenangebot', 'chemie': 'Chemie',
+    'coiffeuse': 'Coiffeuse-Coiffeur', 'deutsch': 'Deutsch', 'eba': 'EBA',
+    'elektroberufe': 'Elektroberufe', 'englisch': 'Englisch', 'fage': 'FaGe',
+    'franzoesisch': 'Franzosisch', 'geographie': 'Geographie',
+    'geomatiker': 'Geomatiker:innen EFZ', 'geschichte': 'Geschichte',
+    'geschichte-und-politik': 'Geschichte und Politik', 'griechisch': 'Griechisch',
+    'ika': 'IKA', 'informatik': 'Informatik', 'italienisch': 'Italienisch',
+    'landwirtschaftsmechaniker': 'Landwirtschaftsmechaniker:innen', 'latein': 'Latein',
+    'mathematik': 'Mathematik', 'maurer': 'Maurer:innen', 'physik': 'Physik',
+    'russisch': 'Russisch', 'schreiner': 'Schreiner:in',
+    'sozialwissenschaften': 'Sozialwissenschaften', 'spanisch': 'Spanisch',
+    'sport': 'Sport', 'ueberfachlich': 'Uberfachlich', 'wirtschaft': 'Wirtschaft'
+}
+# Erstelle eine normalisierte Map für die Suche (z.B. 'franzoesisch' -> 'franzoesisch')
+NORMALIZED_SUBJECT_MAP = {
+    re.sub(r'[^a-z]', '', v.lower().replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')): k 
+    for k, v in SUBJECT_MAP.items()
+}
+
 
 # --- Global Constants & Initialization --------------------------------------
 
@@ -162,6 +184,9 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
 
 
 def summarize_long_text(text, max_length=180):
+    """
+    Zusammenfassen von langem Text. Behebt das 'max_tokens' vs 'max_completion_tokens' Problem.
+    """
     # If short, just return as is
     if not text or len(text) < 200:
         return text
@@ -203,7 +228,32 @@ def summarize_long_text(text, max_length=180):
         # Anderer Fehler
         logger.error(f"OpenAI Summarization error: {repr(e)}")
         return text[:max_length] # Fallback: Text kürzen
-        
+
+def _event_to_date(e: Dict) -> Optional[datetime]:
+    """
+    Hilfsfunktion für die Workshop-Intentlogik:
+    Nimmt ein Event-Dict (aus der DB oder Live) und gibt ein datetime-Objekt zurück.
+    """
+    if not isinstance(e, dict):
+        return None
+
+    # Priorität 1: Bereits geparstes Objekt
+    d_obj = e.get("_d")
+    if isinstance(d_obj, datetime):
+        return d_obj
+
+    # Priorität 2: ISO-String aus der DB
+    d_iso = e.get("date_iso")
+    if d_iso:
+        try:
+            return datetime.fromisoformat(d_iso)
+        except ValueError:
+            pass
+
+    # Priorität 3: Live-Scraping-Text (Fallback)
+    txt = e.get("when") or e.get("title") or ""
+    return parse_de_date(txt)
+
 # --- Date Parsing Helpers ---------------------------------------------------
 # (Diese werden nur noch vom Live-Scraper benötigt)
 
@@ -268,7 +318,11 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
     for e in events:
         d = _event_to_date(e)
         date_str = d.strftime("%d.%m.%Y") if d else ""
+        
+        # KORREKTUR: Bereinige den Titel von Datums-Artefakten aus 'build_database.py'
         t = e.get("title", "Ohne Titel")
+        t = re.sub(r'\s*\(\s*\d{1,2}\.\s*[A-Za-zäöüÄÖÜ]+\s*\d{0,4}\s*\)$', '', t).strip() # Entfernt (20. Nov 2025)
+        
         url = e.get("url") or IMPULS_URL
         place = e.get("place") or ""
         meta = f"<div class='meta'>{place}</div>" if place else ""
@@ -336,7 +390,6 @@ def load_chunks(path: str) -> List[Dict]:
         logger.warning(f"⚠️ Unstrukturierte KB nicht gefunden: {p.resolve()}")
         return []
     
-    # (Behält die .jsonl-Logik bei, falls Sie sie später verwenden)
     if p.suffix == ".jsonl":
         with p.open("r", encoding="utf-8") as f:
             for line in f:
@@ -410,15 +463,15 @@ def advanced_search(query, max_items=12):
     hits = Counter()
     for token in tokens:
         for idx in KEYWORDINDEX.get(token, []):
-            hits[idx] += 1
+            if idx < len(CHUNKS): # Sicherstellen, dass der Index gültig ist
+                hits[idx] += 1
     best_idxs = [idx for idx, _ in hits.most_common(max_items)]
-    results = [CHUNKS[idx] for idx in best_idxs]
+    results = [CHUNKS[idx] for idx in best_idxs if idx < len(CHUNKS)]
     logger.info(f"Advanced search (RAG) for '{query}': {len(results)} hits")
     return results
 
 def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
     """Wrapper für die advanced_search, da Sitemap-Logik nicht verwendet wird."""
-    # (Sitemap-Funktionen werden beibehalten, falls sie in Zukunft benötigt werden)
     return advanced_search(query, max_items=max_items)
 
 # --- Sitemap handling (Wird geladen, aber nicht aktiv für die Suche genutzt) ---
@@ -615,6 +668,18 @@ def ensure_clickable_links(answer_html: str) -> str:
 
 # --- Main API Endpoint (Neue Logik) ------------------------------------------------------
 
+def _normalize_query_for_subjects(q: str) -> List[str]:
+    """Wandelt eine Anfrage wie 'Wirtschaft und Recht' in ['wirtschaft', 'recht'] um."""
+    q = q.lower().replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')
+    q_tokens = re.split(r"[^a-z]+", q)
+    
+    found_subjects = []
+    for token in q_tokens:
+        if token in NORMALIZED_SUBJECT_MAP:
+            found_subjects.append(NORMALIZED_SUBJECT_MAP[token])
+            
+    return found_subjects
+
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
@@ -623,22 +688,44 @@ def ask(req: QuestionRequest):
         # ---- 1. DETERMINISTISCHER HANDLER (NEU) ----
         # (Verwendet die geladene STRUCTURED_DB)
 
-        # KORREKTUR: Robuste Prüfung, ob die DB ein Dictionary ist, bevor wir .get() verwenden
         if not isinstance(STRUCTURED_DB, dict):
             logger.error("STRUCTURED_DB ist keine Dict oder nicht geladen. Ladefehler? Fallback zu RAG.")
-            # Springe direkt zum RAG-Fallback, wenn die DB kaputt ist
-            return rag_fallback(req, q_low)
+            return rag_fallback(req, q_low) # Springe zum RAG-Fallback
 
         # 1a. Innovationsfonds Projects (Direct Python Rendering)
         if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
-            projects = STRUCTURED_DB.get("innovationsfonds_projects", []) 
-            if projects:
+            
+            all_projects = STRUCTURED_DB.get("innovationsfonds_projects", [])
+            projects_to_show = all_projects
+            
+            # NEU: Filterung nach Fach
+            subjects_in_query = _normalize_query_for_subjects(q_low)
+            if subjects_in_query:
+                logger.info(f"Filtere Innovationsfonds nach Fächern: {subjects_in_query}")
+                filtered_projects = []
+                for proj in all_projects:
+                    # Wir müssen die URL prüfen, da 'build_database.py' die Fächer nicht zuverlässig extrahiert.
+                    # Dies ist ein Workaround für die aktuelle DB-Struktur.
+                    proj_url_low = proj.get('url', '').lower()
+                    if any(f"/tags/{key}" in proj_url_low for key in subjects_in_query):
+                        filtered_projects.append(proj)
+                
+                # Workaround, falls recrawl.py die Tags nicht in die URL aufgenommen hat
+                # (Dieser Teil ist schwach, da die Chunks die Fächer nicht zuverlässig enthalten)
+                if not filtered_projects:
+                     for proj in all_projects:
+                         if any(subj_key in proj.get('description', '').lower() for subj_key in subjects_in_query):
+                             filtered_projects.append(proj)
+                
+                projects_to_show = filtered_projects
+            
+            if projects_to_show:
                 html_answer = render_structured_cards_html(
-                    projects, 
+                    projects_to_show, 
                     title="DLH Innovationsfonds Projekte", 
                     source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
                 )
-                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects[:req.max_sources or 4]]
+                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects_to_show[:req.max_sources or 4]]
                 return AnswerResponse(
                     answer=html_answer,
                     sources=returned_sources
@@ -646,7 +733,7 @@ def ask(req: QuestionRequest):
         
         # 1b. Fobizz Resources (Direct Python Rendering)
         if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
-            fobizz_items = STRUCTURED_DB.get("fobizz_resources", []) # Sicherer Zugriff
+            fobizz_items = STRUCTURED_DB.get("fobizz_resources", [])
             if fobizz_items:
                 html_answer = render_structured_cards_html(
                     fobizz_items, 
@@ -674,11 +761,10 @@ def ask(req: QuestionRequest):
                 except ValueError: yr = None
             
             # --- CHUNK ANALYSIS (aus STRUCTURED_DB) ---
-            all_events = STRUCTURED_DB.get("workshops_kb", []) # Sicherer Zugriff
+            all_events = STRUCTURED_DB.get("workshops_kb", [])
             
             if all_events:
                 today = datetime.now(timezone.utc).date()
-                # Filtern der Events (benötigt _d, das beim Laden der DB erstellt wurde)
                 future_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() >= today]
                 past_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() < today]
 
@@ -771,8 +857,7 @@ def rag_fallback(req: QuestionRequest, q_low: str):
 def validate_prompts():
     try:
         prompts = []
-        # Verwende RAG-Chunks, wenn vorhanden, sonst leere Liste
-        for ch in CHUNKS[:2] if CHUNKS else []:
+        for ch in CHUNKS[:2]: # Verwendet die RAG-Chunks
             sys = build_system_prompt()
             user = build_user_prompt("Testfrage", [ch])
             prompts.append({"sys": sys, "user": user})
@@ -836,11 +921,15 @@ def debug_sitemap():
 
 @app.get("/_kb")
 def kb_info():
+    db_status = "OK"
+    if not isinstance(STRUCTURED_DB, dict) or not STRUCTURED_DB:
+        db_status = "FEHLER: structured_db.json nicht gefunden oder leer."
+
     return {
         "ok": True, 
-        "chunks_loaded": CHUNKS_COUNT, 
+        "chunks_loaded (RAG)": CHUNKS_COUNT, 
         "path": str(settings.chunks_path),
-        "structured_db_loaded": bool(STRUCTURED_DB)
+        "structured_db_status": db_status
     }
 
 @app.get("/debug/impuls")
