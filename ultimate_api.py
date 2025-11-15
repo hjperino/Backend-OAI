@@ -28,11 +28,11 @@ class Settings(BaseSettings):
     openai_apikey: str
     openai_model: str 
     chunks_path: str = "processed/processed_chunks.json" 
-    structured_db_path: str = "processed/structured_db.json" 
+    structured_db_path: str = "processed/structured_db.json" # NEUER PFAD
 
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
-STRUCTURED_DB_PATH = settings.structured_db_path 
+STRUCTURED_DB_PATH = settings.structured_db_path # NEU
 
 PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 MAX_HITS_IN_PROMPT = 12
@@ -97,11 +97,14 @@ SUBJECT_MAP = {
     'sozialwissenschaften': 'Sozialwissenschaften', 'spanisch': 'Spanisch',
     'sport': 'Sport', 'ueberfachlich': 'Uberfachlich', 'wirtschaft': 'Wirtschaft'
 }
-# Erstelle eine normalisierte Map für die Suche (z.B. 'franzoesisch' -> 'franzoesisch')
+# Erstelle eine normalisierte Map für die Suche (z.B. 'chemie' -> 'chemie')
 NORMALIZED_SUBJECT_MAP = {
     re.sub(r'[^a-z]', '', v.lower().replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')): k 
     for k, v in SUBJECT_MAP.items()
 }
+# Füge die Schlüssel hinzu (z.B. 'abu' -> 'abu')
+for k in SUBJECT_MAP.keys():
+    NORMALIZED_SUBJECT_MAP[k] = k
 
 
 # --- Global Constants & Initialization --------------------------------------
@@ -189,7 +192,9 @@ def summarize_long_text(text, max_length=180):
     """
     # If short, just return as is
     if not text or len(text) < 200:
-        return text
+        # Wenn der Text kurz ist, nur Zeilenumbrüche entfernen
+        return " ".join(text.splitlines()) 
+        
     prompt = f"Fasse den folgenden Text in zwei Sätzen zusammen:\n{text}"
     try:
         # 1. VERSUCH: Verwende max_completion_tokens (für 'gpt-5')
@@ -223,11 +228,11 @@ def summarize_long_text(text, max_length=180):
                 return summary
             except Exception as e_fallback:
                 logger.error(f"OpenAI Summarization error (Fallback failed): {repr(e_fallback)}")
-                return text[:max_length] # Fallback: Text kürzen
+                return text[:max_length] + "..." # Fallback: Text kürzen
         
         # Anderer Fehler
         logger.error(f"OpenAI Summarization error: {repr(e)}")
-        return text[:max_length] # Fallback: Text kürzen
+        return text[:max_length] + "..." # Fallback: Text kürzen
 
 def _event_to_date(e: Dict) -> Optional[datetime]:
     """
@@ -321,7 +326,9 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
         
         # KORREKTUR: Bereinige den Titel von Datums-Artefakten aus 'build_database.py'
         t = e.get("title", "Ohne Titel")
-        t = re.sub(r'\s*\(\s*\d{1,2}\.\s*[A-Za-zäöüÄÖÜ]+\s*\d{0,4}\s*\)$', '', t).strip() # Entfernt (20. Nov 2025)
+        # Entfernt (z.B. " (20. Nov 2025)" oder " (20.11.2025)")
+        t = re.sub(r'\s*\(\s*\d{1,2}\.\s*[A-Za-zäöüÄÖÜ]+\s*\d{0,4}\s*\)$', '', t).strip() 
+        t = re.sub(r'\s*\(\s*\d{1,2}\.\d{1,2}\.\d{2,4}\s*\)$', '', t).strip()
         
         url = e.get("url") or IMPULS_URL
         place = e.get("place") or ""
@@ -362,8 +369,9 @@ def render_structured_cards_html(items: List[Dict], title: str, source_url: str)
         # Use existing summary if available, otherwise generate one
         item_snippet = item.get("snippet") or summarize_long_text(item_desc) 
         
+        # KORREKTUR (DESIGN): Füge eine CSS-Klasse für den Abstand hinzu
         cards_html.append(
-            f"<article class='card'>"
+            f"<article class='card' style='margin-bottom: 15px; border-bottom: 1px solid #eee; padding-bottom: 10px;'>"
             f"<h4><a href='{item_url}' target='_blank'>{item_title}</a></h4>"
             f"<p>{item_snippet}</p>"
             f"</article>"
@@ -666,7 +674,7 @@ def ensure_clickable_links(answer_html: str) -> str:
         flags=re.IGNORECASE,
     )
 
-# --- Main API Endpoint (Neue Logik) ------------------------------------------------------
+# --- Main API Endpoint (NEUE LOGIK) ------------------------------------------------------
 
 def _normalize_query_for_subjects(q: str) -> List[str]:
     """Wandelt eine Anfrage wie 'Wirtschaft und Recht' in ['wirtschaft', 'recht'] um."""
@@ -697,39 +705,41 @@ def ask(req: QuestionRequest):
             
             all_projects = STRUCTURED_DB.get("innovationsfonds_projects", [])
             projects_to_show = all_projects
+            title = "Alle DLH Innovationsfonds Projekte"
             
             # NEU: Filterung nach Fach
-            subjects_in_query = _normalize_query_for_subjects(q_low)
-            if subjects_in_query:
-                logger.info(f"Filtere Innovationsfonds nach Fächern: {subjects_in_query}")
+            subjects_in_query_keys = _normalize_query_for_subjects(q_low)
+            
+            if subjects_in_query_keys:
+                logger.info(f"Filtere Innovationsfonds nach Fächern: {subjects_in_query_keys}")
                 filtered_projects = []
                 for proj in all_projects:
-                    # Wir müssen die URL prüfen, da 'build_database.py' die Fächer nicht zuverlässig extrahiert.
-                    # Dies ist ein Workaround für die aktuelle DB-Struktur.
-                    proj_url_low = proj.get('url', '').lower()
-                    if any(f"/tags/{key}" in proj_url_low for key in subjects_in_query):
+                    # Prüfe, ob eines der gesuchten Fächer in den Fächern des Projekts enthalten ist
+                    if any(subj_key in proj.get('subjects', []) for subj_key in subjects_in_query_keys):
                         filtered_projects.append(proj)
                 
-                # Workaround, falls recrawl.py die Tags nicht in die URL aufgenommen hat
-                # (Dieser Teil ist schwach, da die Chunks die Fächer nicht zuverlässig enthalten)
-                if not filtered_projects:
-                     for proj in all_projects:
-                         if any(subj_key in proj.get('description', '').lower() for subj_key in subjects_in_query):
-                             filtered_projects.append(proj)
-                
-                projects_to_show = filtered_projects
+                if filtered_projects:
+                    projects_to_show = filtered_projects
+                    # Erstelle einen Titel basierend auf den gefundenen Fächern
+                    subject_names = [SUBJECT_MAP.get(key, key) for key in subjects_in_query_keys]
+                    title = f"Innovationsfonds Projekte (Filter: {', '.join(subject_names)})"
+                else:
+                    # Wenn Filter gesetzt, aber nichts gefunden wurde
+                    projects_to_show = [] 
+                    subject_names = [SUBJECT_MAP.get(key, key) for key in subjects_in_query_keys]
+                    title = f"Innovationsfonds Projekte (Keine Treffer für: {', '.join(subject_names)})"
             
-            if projects_to_show:
-                html_answer = render_structured_cards_html(
-                    projects_to_show, 
-                    title="DLH Innovationsfonds Projekte", 
-                    source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
-                )
-                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects_to_show[:req.max_sources or 4]]
-                return AnswerResponse(
-                    answer=html_answer,
-                    sources=returned_sources
-                )
+            # Rendere die (gefilterte oder ungefilterte) Liste
+            html_answer = render_structured_cards_html(
+                projects_to_show, 
+                title=title, 
+                source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
+            )
+            returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects_to_show[:req.max_sources or 4]]
+            return AnswerResponse(
+                answer=html_answer,
+                sources=returned_sources
+            )
         
         # 1b. Fobizz Resources (Direct Python Rendering)
         if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
@@ -765,6 +775,7 @@ def ask(req: QuestionRequest):
             
             if all_events:
                 today = datetime.now(timezone.utc).date()
+                # Filtern der Events (benötigt _d, das beim Laden der DB erstellt wurde)
                 future_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() >= today]
                 past_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() < today]
 
@@ -819,6 +830,7 @@ def ask(req: QuestionRequest):
             
 
         # ---- 3. DEFAULT LLM/RAG BRANCH (General Concepts, Definitions, etc.) ----
+        # (Fragen wie "Was ist GenKI?" landen hier)
         return rag_fallback(req, q_low)
 
     except Exception as e:
