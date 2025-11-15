@@ -616,120 +616,125 @@ def ensure_clickable_links(answer_html: str) -> str:
 
 # --- Main API Endpoint (NEUE LOGIK) ------------------------------------------------------
 
+# --- Main API Endpoint (MIT ROBUSTER TYPPRÜFUNG) --------------------------------
+
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
         q_low = (req.question or "").lower()
         
         # ---- 1. DETERMINISTISCHER HANDLER (NEU) ----
-        # (Verwendet die geladene STRUCTURED_DB)
-
-        # 1a. Innovationsfonds Projects (Direct Python Rendering)
-        if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
-            projects = STRUCTURED_DB.get("innovationsfonds_projects", [])
-            if projects:
-                html_answer = render_structured_cards_html(
-                    projects, 
-                    title="DLH Innovationsfonds Projekte", 
-                    source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
-                )
-                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects[:req.max_sources or 4]]
-                return AnswerResponse(
-                    answer=html_answer,
-                    sources=returned_sources
-                )
         
-        # 1b. Fobizz Resources (Direct Python Rendering)
-        if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
-            fobizz_items = STRUCTURED_DB.get("fobizz_resources", [])
-            if fobizz_items:
-                html_answer = render_structured_cards_html(
-                    fobizz_items, 
-                    title="DLH Fobizz Angebote", 
-                    source_url="https://dlh.zh.ch/home/wb-kompass/wb-angebote/1007-wb-plattformen"
-                )
-                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in fobizz_items[:req.max_sources or 4]]
-                return AnswerResponse(
-                    answer=html_answer,
-                    sources=returned_sources
-                )
+        # KORREKTUR: Robuste Prüfung, ob die DB ein Dictionary ist, bevor wir .get() verwenden
+        if isinstance(STRUCTURED_DB, dict):
+            
+            # 1a. Innovationsfonds Projects (Direct Python Rendering)
+            if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
+                # Greift sicher auf das Dict zu
+                projects = STRUCTURED_DB.get("innovationsfonds_projects", []) 
+                if projects:
+                    html_answer = render_structured_cards_html(
+                        projects, 
+                        title="DLH Innovationsfonds Projekte", 
+                        source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
+                    )
+                    returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects[:req.max_sources or 4]]
+                    return AnswerResponse(
+                        answer=html_answer,
+                        sources=returned_sources
+                    )
+            
+            # 1b. Fobizz Resources (Direct Python Rendering)
+            if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
+                fobizz_items = STRUCTURED_DB.get("fobizz_resources", []) # Sicherer Zugriff
+                if fobizz_items:
+                    html_answer = render_structured_cards_html(
+                        fobizz_items, 
+                        title="DLH Fobizz Angebote", 
+                        source_url="https://dlh.zh.ch/home/wb-kompass/wb-angebote/1007-wb-plattformen"
+                    )
+                    returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in fobizz_items[:req.max_sources or 4]]
+                    return AnswerResponse(
+                        answer=html_answer,
+                        sources=returned_sources
+                    )
 
-        # 1c. WORKSHOP INTENT (Time-sensitive, aus DB)
-        if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
-            
-            def _norm(s: str) -> str:
-                return (s.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
-            qn = _norm(req.question or "")
-            want_past = any(k in qn for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"])
-            want_next = any(k in qn for k in ["naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes"])
-            yr = None
-            m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
-            if m:
-                try: yr = int(m.group(1))
-                except ValueError: yr = None
-            
-            # --- CHUNK ANALYSIS (aus STRUCTURED_DB) ---
-            all_events = STRUCTURED_DB.get("workshops_kb", [])
-            
-            if all_events:
-                today = datetime.now(timezone.utc).date()
-                # Filtern der Events (benötigt _d, das beim Laden der DB erstellt wurde)
-                future_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() >= today]
-                past_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() < today]
-
-                print(f"Y Chunks found: future={len(future_chunk_events)}, past={len(past_chunk_events)}")
+            # 1c. WORKSHOP INTENT (Time-sensitive, aus DB)
+            if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
                 
-                if want_next:
-                    events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])[:1]
-                    title_suffix = " (aus KB)"
-                elif want_past:
-                    if yr: past_chunk_events = [e for e in past_chunk_events if e["_d"].year == yr]
-                    events_to_show = sorted(past_chunk_events, key=lambda x: x["_d"], reverse=True)
-                    title_suffix = " (aus KB)" + (f" {yr}" if yr else "")
-                else: # Default: all future events from chunks
-                    events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])
-                    title_suffix = " (aus KB)"
+                def _norm(s: str) -> str:
+                    return (s.lower().replace("ä", "ae").replace("ö", "oe").replace("ü", "ue").replace("ß", "ss"))
+                qn = _norm(req.question or "")
+                want_past = any(k in qn for k in ["gab es", "waren", "vergangenen", "bisherigen", "im jahr", "letzten", "fruehere", "frühere", "bisher"])
+                want_next = any(k in qn for k in ["naechste", "nächste", "der naechste", "der nächste", "als naechstes", "als nächstes", "nur der naechste", "nur der nächste", "naechstes", "nächstes"])
+                yr = None
+                m = re.search(r"(?:jahr|jahrgang|seit)\s*(20\d{2})", qn)
+                if m:
+                    try: yr = int(m.group(1))
+                    except ValueError: yr = None
+                
+                # --- CHUNK ANALYSIS (aus STRUCTURED_DB) ---
+                all_events = STRUCTURED_DB.get("workshops_kb", []) # Sicherer Zugriff
+                
+                if all_events:
+                    today = datetime.now(timezone.utc).date()
+                    # Filtern der Events (benötigt _d, das beim Laden der DB erstellt wurde)
+                    future_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() >= today]
+                    past_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() < today]
+
+                    print(f"Y Chunks found: future={len(future_chunk_events)}, past={len(past_chunk_events)}")
                     
-                html = render_workshops_timeline_html(
-                    events_to_show, 
-                    title=("Nächster Impuls-Workshop" if want_next else "Kommende Impuls-Workshops") + title_suffix
-                )
+                    if want_next:
+                        events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])[:1]
+                        title_suffix = " (aus KB)"
+                    elif want_past:
+                        if yr: past_chunk_events = [e for e in past_chunk_events if e["_d"].year == yr]
+                        events_to_show = sorted(past_chunk_events, key=lambda x: x["_d"], reverse=True)
+                        title_suffix = " (aus KB)" + (f" {yr}" if yr else "")
+                    else: # Default: all future events from chunks
+                        events_to_show = sorted(future_chunk_events, key=lambda x: x["_d"])
+                        title_suffix = " (aus KB)"
+                        
+                    html = render_workshops_timeline_html(
+                        events_to_show, 
+                        title=("Nächster Impuls-Workshop" if want_next else "Kommende Impuls-Workshops") + title_suffix
+                    )
 
-                return AnswerResponse(
-                    answer=html,
-                    sources=[SourceItem(title=e['title'], url=e['url']) for e in events_to_show if 'title' in e and 'url' in e] 
-                )
+                    return AnswerResponse(
+                        answer=html,
+                        sources=[SourceItem(title=e['title'], url=e['url']) for e in events_to_show if 'title' in e and 'url' in e] 
+                    )
 
-            # 4. Fallback to LIVE SCRAPER if DB is empty
-            
-            events = fetch_live_impuls_workshops()
-            norm_events = []
-            for e in events:
-                d = _event_to_date(e)
-                if d: ee = dict(e); ee["_d"] = d; norm_events.append(ee)
+                # 4. Fallback to LIVE SCRAPER if DB is empty
+                
+                events = fetch_live_impuls_workshops()
+                norm_events = []
+                for e in events:
+                    d = _event_to_date(e)
+                    if d: ee = dict(e); ee["_d"] = d; norm_events.append(ee)
 
-            today = datetime.now(timezone.utc).date()
-            future = [e for e in norm_events if e["_d"].date() >= today]
-            past = [e for e in norm_events if e["_d"].date() < today]
+                today = datetime.now(timezone.utc).date()
+                future = [e for e in norm_events if e["_d"].date() >= today]
+                past = [e for e in norm_events if e["_d"].date() < today]
 
-            if want_next:
-                future_sorted = sorted(future, key=lambda x: x["_d"])
-                events_to_show = future_sorted[:1]
-                html = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop (Live)")
-            elif want_past:
-                if yr: past = [e for e in past if e["_d"].year == yr]
-                past_sorted = sorted(past, key=lambda x: x["_d"], reverse=True)
-                html = render_workshops_timeline_html(past_sorted, title="Vergangene Impuls-Workshops (Live)" + (f" {yr}" if yr else ""))
-            else:
-                future_sorted = sorted(future, key=lambda x: x["_d"])
-                html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops (Live)")
-            
-            return AnswerResponse(answer=html, sources=[SourceItem(title="Impuls-Workshop-Übersicht", url=IMPULS_URL)])
-            
-
+                if want_next:
+                    future_sorted = sorted(future, key=lambda x: x["_d"])
+                    events_to_show = future_sorted[:1]
+                    html = render_workshops_timeline_html(events_to_show, title="Nächster Impuls-Workshop (Live)")
+                elif want_past:
+                    if yr: past = [e for e in past if e["_d"].year == yr]
+                    past_sorted = sorted(past, key=lambda x: x["_d"], reverse=True)
+                    html = render_workshops_timeline_html(past_sorted, title="Vergangene Impuls-Workshops (Live)" + (f" {yr}" if yr else ""))
+                else:
+                    future_sorted = sorted(future, key=lambda x: x["_d"])
+                    html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops (Live)")
+                
+                return AnswerResponse(answer=html, sources=[SourceItem(title="Impuls-Workshop-Übersicht", url=IMPULS_URL)])
+        
         # ---- 3. DEFAULT LLM/RAG BRANCH (General Concepts, Definitions, etc.) ----
         
-        logger.info("Kein strukturierter Handler. Fallback zu RAG/LLM.")
+        logger.info("Kein strukturierter Handler oder DB nicht geladen. Fallback zu RAG/LLM.")
+        
         # Führe die RAG-Suche (advanced_search) nur aus, wenn sie benötigt wird
         ranked = get_ranked_with_sitemap(req.question, max_items=req.max_sources or 4)
         
