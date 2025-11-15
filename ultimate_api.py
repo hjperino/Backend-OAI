@@ -28,11 +28,23 @@ class Settings(BaseSettings):
     openai_apikey: str
     openai_model: str 
     chunks_path: str = "processed/processed_chunks.json" 
-    structured_db_path: str = "processed/structured_db.json" # NEUER PFAD
+    structured_db_path: str = "processed/structured_db.json"
+    
+    # NEU: JSONBin.io Konfiguration (aus Render ENV VARS)
+    jsonbin_api_key: str = "" 
+    jsonbin_id: str = ""
 
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
-STRUCTURED_DB_PATH = settings.structured_db_path # NEU
+STRUCTURED_DB_PATH = settings.structured_db_path
+
+# NEU: JSONBin.io Konfiguration
+JSONBIN_URL = f"https://api.jsonbin.io/v3/b/{settings.jsonbin_id}"
+JSONBIN_HEADERS = {
+    'Content-Type': 'application/json',
+    'X-Master-Key': settings.jsonbin_api_key
+}
+
 
 PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 MAX_HITS_IN_PROMPT = 12
@@ -57,13 +69,18 @@ class QuestionRequest(BaseModel):
     language: Optional[str] = "de"
     max_sources: Optional[int] = 3
 
+# NEU: Admin-Modell zum Speichern von FAQs
+class FaqItem(BaseModel):
+    question: str
+    answer_html: str
+    keywords: List[str] = []
+
 # --- Logging Setup ----------------------------------------------------------
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Datums-Parsing (de) ----------------------------------------------------
-# (Wird für Live-Scraping und DB-ISO-Strings benötigt)
 
 DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
 DMY_TEXT_RE = re.compile(
@@ -97,12 +114,10 @@ SUBJECT_MAP = {
     'sozialwissenschaften': 'Sozialwissenschaften', 'spanisch': 'Spanisch',
     'sport': 'Sport', 'ueberfachlich': 'Uberfachlich', 'wirtschaft': 'Wirtschaft'
 }
-# Erstelle eine normalisierte Map für die Suche (z.B. 'chemie' -> 'chemie')
 NORMALIZED_SUBJECT_MAP = {
     re.sub(r'[^a-z]', '', v.lower().replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')): k 
     for k, v in SUBJECT_MAP.items()
 }
-# Füge die Schlüssel hinzu (z.B. 'abu' -> 'abu')
 for k in SUBJECT_MAP.keys():
     NORMALIZED_SUBJECT_MAP[k] = k
 
@@ -140,7 +155,8 @@ openai_client = OpenAI(api_key=settings.openai_apikey)
 app = FastAPI(title="DLH OpenAI API", version="1.0")
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["https://perino.info"], # Passen Sie dies für Ihre Domains an
+    # Passen Sie dies an, um nur Ihre Frontend-Domain zuzulassen
+    allow_origins=["https://perino.info", "http://localhost:8000", "http://127.0.0.1:5500"], 
     allow_credentials=True,
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
@@ -460,6 +476,30 @@ def load_structured_db(path: str) -> Dict:
         logger.error(f"Fehler beim Laden der strukturierten DB: {e}")
         return {}
 
+def load_faq_from_bin() -> List[Dict]:
+    """(NEU) Lädt die Admin-kuratierte FAQ-BIN von JSONBin.io."""
+    if not settings.jsonbin_api_key or not settings.jsonbin_id:
+        logger.warning("JSONBIN_API_KEY oder JSONBIN_ID nicht gesetzt. FAQ-Cache ist deaktiviert.")
+        return []
+    
+    try:
+        # /latest holen, um immer die aktuellste Version zu bekommen
+        response = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
+        response.raise_for_status()
+        
+        # JSONBin.io umschließt die Daten in einem "record"-Feld
+        data = response.json().get("record", [])
+        
+        if not isinstance(data, list):
+            logger.error(f"FAQ-Bin ({settings.jsonbin_id}) ist keine Liste. Wird ignoriert.")
+            return []
+        
+        logger.info(f"✅ {len(data)} FAQ-Einträge aus JSONBin.io geladen.")
+        return data
+    except Exception as e:
+        logger.error(f"Fehler beim Laden der FAQ-Bin von JSONBin.io: {e}")
+        return []
+
 # Load chunks (für RAG-Fallback)
 CHUNKS: List[Dict] = load_chunks(CHUNKS_PATH)
 CHUNKS_COUNT = len(CHUNKS)
@@ -467,6 +507,9 @@ logger.info(f"✅ {CHUNKS_COUNT} Chunks (für RAG) geladen von {CHUNKS_PATH}")
 
 # Load structured DB (für deterministische Antworten)
 STRUCTURED_DB: Dict = load_structured_db(STRUCTURED_DB_PATH)
+
+# Load FAQ-Bin (für Admin-Antworten)
+FAQ_BIN: List[Dict] = load_faq_from_bin()
 
 
 # --- RAG Fallback Functions (Keyword Search & Prompting) ----------------
@@ -698,6 +741,63 @@ def ensure_clickable_links(answer_html: str) -> str:
         flags=re.IGNORECASE,
     )
 
+# --- NEU: Admin-Speicherfunktionen (via JSONBin.io) ---
+
+def append_to_json_bin(data: Dict) -> bool:
+    """Liest die FAQ-BIN, fügt ein neues Element hinzu und speichert sie zurück auf JSONBin.io."""
+    global FAQ_BIN # Wichtig, um den In-Memory-Cache zu aktualisieren
+    
+    if not settings.jsonbin_api_key or not settings.jsonbin_id:
+        logger.error("JSONBin API Key/ID nicht konfiguriert. Speichern fehlgeschlagen.")
+        return False
+
+    try:
+        # 1. Aktuelle DB holen
+        # (Wir verwenden /latest, um sicherzustellen, dass wir keine Race Condition haben)
+        get_response = requests.get(f"{JSONBIN_URL}/latest", headers=JSONBIN_HEADERS, timeout=10)
+        get_response.raise_for_status()
+        
+        db = get_response.json().get("record", [])
+        if not isinstance(db, list):
+            db = []
+
+        # 2. Redundanzprüfung (Frage darf noch nicht existieren)
+        if not any(item.get("question") == data.get("question") for item in db):
+            db.append(data)
+            
+            # 3. Aktualisierte DB zurückschreiben
+            put_response = requests.put(JSONBIN_URL, headers=JSONBIN_HEADERS, json=db, timeout=10)
+            put_response.raise_for_status()
+            
+            FAQ_BIN = db # Aktualisiere den In-Memory-Cache
+            logger.info(f"✅ Eintrag in JSONBin.io gespeichert. FAQ-Cache hat jetzt {len(db)} Einträge.")
+            return True
+        else:
+            logger.info("Eintrag bereits in FAQ-Bin vorhanden, übersprungen.")
+            return True
+
+    except Exception as e:
+        logger.error(f"Fehler beim Speichern in JSONBin.io: {e}")
+        return False
+
+def find_in_faq_cache(query: str, faq_bin: List[Dict]) -> Optional[str]:
+    """Durchsucht die FAQ-Bin nach Keywords."""
+    q_low = query.lower()
+    for item in faq_bin:
+        keywords = item.get("keywords", [])
+        
+        # Prüfe, ob die exakte Frage übereinstimmt
+        if q_low == item.get("question", "").lower():
+            logger.info(f"FAQ-Cache-Treffer (Exakt): {q_low}")
+            return item.get("answer_html")
+            
+        # Prüfe, ob ein Keyword passt
+        for kw in keywords:
+            if kw.lower() in q_low:
+                logger.info(f"FAQ-Cache-Treffer (Keyword: {kw}): {q_low}")
+                return item.get("answer_html")
+    return None
+
 # --- Main API Endpoint (Neue Logik) ------------------------------------------------------
 
 def _normalize_query_for_subjects(q: str) -> List[str]:
@@ -712,19 +812,52 @@ def _normalize_query_for_subjects(q: str) -> List[str]:
             
     return found_subjects
 
+# NEUER Endpunkt für Admin-Speicherung
+@app.post("/admin/save-faq", response_model=AnswerResponse)
+def admin_save_faq(item: FaqItem):
+    """
+    Sicherer Endpunkt, der vom Frontend (nach Passwort-Eingabe) aufgerufen wird,
+    um eine gute Antwort in der JSONBin.io-Datenbank zu speichern.
+    """
+    try:
+        success = append_to_json_bin(item.dict())
+        if success:
+            return AnswerResponse(answer="<p>✅ Antwort wurde in der FAQ-Datenbank gespeichert und der Cache aktualisiert.</p>", sources=[])
+        else:
+            raise HTTPException(status_code=500, detail="Fehler beim Speichern in der externen BIN.")
+    except Exception as e:
+        logger.error(f"Fehler bei /admin/save-faq: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
     try:
-        q_low = (req.question or "").lower()
+        q_raw = req.question.strip()
+        q_low = q_raw.lower()
         
-        # ---- 1. DETERMINISTISCHER HANDLER (NEU) ----
-        # (Verwendet die geladene STRUCTURED_DB)
+        # ---- STUFE 1: FAQ CACHE (NEU) ----
+        # (Prüft die `faq_bin.json`, die von JSONBin geladen wurde)
+        cached_answer = find_in_faq_cache(q_low, FAQ_BIN)
+        if cached_answer:
+            sources = [] 
+            try:
+                soup = BeautifulSoup(cached_answer, 'html.parser')
+                for a in soup.select(".sources li a"):
+                    sources.append(SourceItem(title=a.get_text(strip=True), url=a.get('href', '#')))
+            except Exception:
+                pass 
+                
+            return AnswerResponse(answer=cached_answer, sources=sources)
+        
+        
+        # ---- STUFE 2: DETERMINISTISCHER HANDLER (STRUCTURED_DB) ----
 
         if not isinstance(STRUCTURED_DB, dict):
             logger.error("STRUCTURED_DB ist keine Dict oder nicht geladen. Ladefehler? Fallback zu RAG.")
             return rag_fallback(req, q_low) # Springe zum RAG-Fallback
 
-        # 1a. Innovationsfonds Projects (Direct Python Rendering)
+        # 2a. Innovationsfonds Projects (Direct Python Rendering)
         if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
             
             all_projects = STRUCTURED_DB.get("innovationsfonds_projects", [])
@@ -744,28 +877,26 @@ def ask(req: QuestionRequest):
                 
                 if filtered_projects:
                     projects_to_show = filtered_projects
-                    # Erstelle einen Titel basierend auf den gefundenen Fächern
                     subject_names = [SUBJECT_MAP.get(key, key) for key in subjects_in_query_keys]
                     title = f"Innovationsfonds Projekte (Filter: {', '.join(subject_names)})"
                 else:
-                    # Wenn Filter gesetzt, aber nichts gefunden wurde
                     projects_to_show = [] 
                     subject_names = [SUBJECT_MAP.get(key, key) for key in subjects_in_query_keys]
                     title = f"Innovationsfonds Projekte (Keine Treffer für: {', '.join(subject_names)})"
             
-            # Rendere die (gefilterte oder ungefilterte) Liste
             html_answer = render_structured_cards_html(
                 projects_to_show, 
                 title=title, 
                 source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
             )
             returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects_to_show[:req.max_sources or 4]]
+            
             return AnswerResponse(
                 answer=html_answer,
                 sources=returned_sources
             )
         
-        # 1b. Fobizz Resources (Direct Python Rendering)
+        # 2b. Fobizz Resources (Direct Python Rendering)
         if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
             fobizz_items = STRUCTURED_DB.get("fobizz_resources", [])
             if fobizz_items:
@@ -775,12 +906,13 @@ def ask(req: QuestionRequest):
                     source_url="https://dlh.zh.ch/home/wb-kompass/wb-angebote/1007-wb-plattformen"
                 )
                 returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in fobizz_items[:req.max_sources or 4]]
+                
                 return AnswerResponse(
                     answer=html_answer,
                     sources=returned_sources
                 )
         
-        # 1c. CoPs (Communities of Practice) (NEU)
+        # 2c. CoPs (Communities of Practice) (Hardcoded DB)
         if any(k in q_low for k in ["cops", "communities of practice", "community"]):
             cops_items = COPS_HARDCODED_DB # Greife auf die hardcodierte Liste zu
             if cops_items:
@@ -790,12 +922,13 @@ def ask(req: QuestionRequest):
                     source_url="https://dlh.zh.ch/home/cops"
                 )
                 returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in cops_items[:req.max_sources or 4]]
+                
                 return AnswerResponse(
                     answer=html_answer,
                     sources=returned_sources
                 )
 
-        # 1d. WORKSHOP INTENT (Time-sensitive, aus DB)
+        # 2d. WORKSHOP INTENT (Time-sensitive, aus DB)
         if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
             
             def _norm(s: str) -> str:
@@ -882,6 +1015,8 @@ def rag_fallback(req: QuestionRequest, q_low: str):
     Diese Funktion wird aufgerufen, wenn keine der deterministischen Regeln zutrifft.
     Sie verwendet die RAG-Pipeline (Chunks + LLM), um eine Antwort auf Freitextfragen zu generieren.
     """
+    global LAST_QA_PAIR # Wichtig für Admin-Speicher
+    
     logger.info(f"Kein strukturierter Handler für '{q_low}'. Fallback zu RAG/LLM.")
     
     # Führe die RAG-Suche (advanced_search) nur aus, wenn sie benötigt wird
@@ -900,6 +1035,9 @@ def rag_fallback(req: QuestionRequest, q_low: str):
             
     logger.info(f"Returning answer: {repr(answer_html)[:400]}")
     response = AnswerResponse(answer=answer_html, sources=sources)
+    
+    # Speichere die RAG-Antwort, falls der Admin sie behalten will
+    LAST_QA_PAIR = {"question": req.question, "answer_html": response.answer, "keywords": [q_low]}
     return response
 
 # --- Debug and Info Endpoints (Restored from original file) ---
@@ -979,7 +1117,8 @@ def kb_info():
         "ok": True, 
         "chunks_loaded (RAG)": CHUNKS_COUNT, 
         "path": str(settings.chunks_path),
-        "structured_db_status": db_status
+        "structured_db_status": db_status,
+        "faq_bin_loaded": len(FAQ_BIN)
     }
 
 @app.get("/debug/impuls")
@@ -1017,6 +1156,7 @@ def health():
         "status": "healthy",
         "chunks_loaded (RAG)": CHUNKS_COUNT,
         "structured_db_status": db_status,
+        "faq_bin_loaded": len(FAQ_BIN),
         "model": settings.openai_model
     }
 
