@@ -1,5 +1,22 @@
-__pycache__/
-*.pyc
-.env
+# Python Virtual Environment
+.venv/
 venv/
-*.log
+
+# macOS Systemdateien
+.DS_Store
+processed/.DS_Store
+
+# Offline gecrawlte Rohdaten (zu groß)
+processed/dlh-zh-ch/
+
+# Crawler-Cache
+crawler_cache/
+
+# Alte/Testdateien
+*.html
+*.jsonl
+*.pyc
+processed/urls.json
+run_batches.py
+ultimate_api-old.py
+runtime.txt
