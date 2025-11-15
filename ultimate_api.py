@@ -167,46 +167,43 @@ def summarize_long_text(text, max_length=180):
         return text
     prompt = f"Fasse den folgenden Text in zwei Sätzen zusammen:\n{text}"
     try:
+        # 1. VERSUCH: Verwende max_completion_tokens (für 'gpt-5')
         response = openai_client.chat.completions.create(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=max_length,
+            max_completion_tokens=max_length,
             stream=False
         )
         summary = response.choices[0].message.content.strip()
         return summary
     except Exception as e:
+        error_msg = str(e)
+        # 2. FALLBACK: Wenn 'max_completion_tokens' fehlschlägt, versuche 'max_tokens'
+        if 'unsupported parameter' in error_msg.lower() and 'max_tokens' in error_msg.lower():
+            logger.warning(f"Summarize: Model {settings.openai_model} rejected max_completion_tokens. Falling back to max_tokens.")
+            try:
+                response = openai_client.chat.completions.create(
+                    model=settings.openai_model,
+                    messages=[
+                        {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_length,
+                    stream=False
+                )
+                summary = response.choices[0].message.content.strip()
+                return summary
+            except Exception as e_fallback:
+                logger.error(f"OpenAI Summarization error (Fallback failed): {repr(e_fallback)}")
+                return text[:max_length] # Fallback: Text kürzen
+        
+        # Anderer Fehler
         logger.error(f"OpenAI Summarization error: {repr(e)}")
-        return text[:max_length]
-
-def _event_to_date(e: Dict) -> Optional[datetime]:
-    """
-    Hilfsfunktion für die Workshop-Intentlogik:
-    Nimmt ein Event-Dict (aus der DB oder Live) und gibt ein datetime-Objekt zurück.
-    """
-    if not isinstance(e, dict):
-        return None
-
-    # Priorität 1: Bereits geparstes Objekt
-    d_obj = e.get("_d")
-    if isinstance(d_obj, datetime):
-        return d_obj
-
-    # Priorität 2: ISO-String aus der DB
-    d_iso = e.get("date_iso")
-    if d_iso:
-        try:
-            return datetime.fromisoformat(d_iso)
-        except ValueError:
-            pass
-
-    # Priorität 3: Live-Scraping-Text (Fallback)
-    txt = e.get("when") or e.get("title") or ""
-    return parse_de_date(txt)
-
+        return text[:max_length] # Fallback: Text kürzen
+        
 # --- Date Parsing Helpers ---------------------------------------------------
 # (Diese werden nur noch vom Live-Scraper benötigt)
 
