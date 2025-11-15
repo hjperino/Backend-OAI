@@ -28,11 +28,13 @@ class Settings(BaseSettings):
     openai_apikey: str
     openai_model: str 
     chunks_path: str = "processed/processed_chunks.json" 
-    structured_db_path: str = "processed/structured_db.json" # NEUER PFAD
+    structured_db_path: str = "processed/structured_db.json"
+    faq_bin_path: str = "processed/faq_bin.json" # NEU: Pfad zur Admin-Cache-Datei
 
 settings = Settings()
 CHUNKS_PATH = settings.chunks_path
-STRUCTURED_DB_PATH = settings.structured_db_path # NEU
+STRUCTURED_DB_PATH = settings.structured_db_path
+FAQ_BIN_PATH = settings.faq_bin_path # NEU
 
 PROMPT_CHARS_BUDGET = int(os.getenv("PROMPT_CHARS_BUDGET", "24000"))
 MAX_HITS_IN_PROMPT = 12
@@ -63,7 +65,6 @@ logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # --- Datums-Parsing (de) ----------------------------------------------------
-# (Wird für Live-Scraping und DB-ISO-Strings benötigt)
 
 DMY_DOTTED_RE = re.compile(r"\b(\d{1,2})\.(\d{1,2})\.(\d{2,4})\b")
 DMY_TEXT_RE = re.compile(
@@ -80,6 +81,55 @@ MONTHS_DE = {
     "dez": 12, "dezember": 12,
 }
 
+# --- NEU: SUBJECT MAP (Für Innovationsfonds-Filterung) ---
+SUBJECT_MAP = {
+    'abu': 'ABU', 'architektur': 'Architektur EFZ', 'automobilberufe': 'Automobilberufe',
+    'berufskunde': 'Berufskunde', 'bildnerisches-gestalten': 'Bildnerisches Gestalten',
+    'biologie': 'Biologie', 'brueckenangebot': 'Bruckenangebot', 'chemie': 'Chemie',
+    'coiffeuse': 'Coiffeuse-Coiffeur', 'deutsch': 'Deutsch', 'eba': 'EBA',
+    'elektroberufe': 'Elektroberufe', 'englisch': 'Englisch', 'fage': 'FaGe',
+    'franzoesisch': 'Franzosisch', 'geographie': 'Geographie',
+    'geomatiker': 'Geomatiker:innen EFZ', 'geschichte': 'Geschichte',
+    'geschichte-und-politik': 'Geschichte und Politik', 'griechisch': 'Griechisch',
+    'ika': 'IKA', 'informatik': 'Informatik', 'italienisch': 'Italienisch',
+    'landwirtschaftsmechaniker': 'Landwirtschaftsmechaniker:innen', 'latein': 'Latein',
+    'mathematik': 'Mathematik', 'maurer': 'Maurer:innen', 'physik': 'Physik',
+    'russisch': 'Russisch', 'schreiner': 'Schreiner:in',
+    'sozialwissenschaften': 'Sozialwissenschaften', 'spanisch': 'Spanisch',
+    'sport': 'Sport', 'ueberfachlich': 'Uberfachlich', 'wirtschaft': 'Wirtschaft'
+}
+NORMALIZED_SUBJECT_MAP = {
+    re.sub(r'[^a-z]', '', v.lower().replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')): k 
+    for k, v in SUBJECT_MAP.items()
+}
+for k in SUBJECT_MAP.keys():
+    NORMALIZED_SUBJECT_MAP[k] = k
+
+# --- NEU: HARDCODED CoP-Datenbank ---
+COPS_URL = "https://dlh.zh.ch/home/cops"
+COPS_HARDCODED_DB = [
+    {"title": "Allgemeinbildender Unterricht", "description": "Leitung: Erika Langhans", "url": COPS_URL},
+    {"title": "Chemie", "description": "Leitung: Amadeus Bärtsch", "url": COPS_URL},
+    {"title": "Deutsch", "description": "Leitung: Carmen Aus der Au, Natalija Jovanovic", "url": COPS_URL},
+    {"title": "Englisch", "description": "Leitung: Franziska Tobler, Marija Josifovic", "url": COPS_URL},
+    {"title": "Entwicklungsteamleitungen", "description": "Leitung: Hansjürg Perino", "url": COPS_URL},
+    {"title": "Fachkundige indiv. Begleitung FiB", "description": "Leitung: Nadine Vetterli", "url": COPS_URL},
+    {"title": "Gamification", "description": "Leitung: Benaja Schellenberg", "url": COPS_URL},
+    {"title": "GenKI", "description": "Leitung: Pascal Schmidt", "url": COPS_URL},
+    {"title": "Geografie", "description": "Leitung: Patrik Weiss", "url": COPS_URL},
+    {"title": "Geschichte", "description": "Leitung: Justine Burkhalter", "url": COPS_URL},
+    {"title": "Informatik", "description": "Leitung: Theresa Luternauer", "url": COPS_URL},
+    {"title": "KV", "description": "Leitung: Anita Schuler", "url": COPS_URL},
+    {"title": "Lehrpersonen Prävention und Gesundheitsförderung", "description": "Leitung: Christoph Staub", "url": COPS_URL},
+    {"title": "Medien- und Informationskompetenz", "description": "Leitung: Monica Bronner", "url": COPS_URL},
+    {"title": "Meta", "description": "Leitung: Christof Glaus", "url": COPS_URL},
+    {"title": "Moodle Admin", "description": "Leitung: Thomas Korner", "url": COPS_URL},
+    {"title": "Moodle Lehrpersonen", "description": "Leitung: Simon Küpfer", "url": COPS_URL},
+    {"title": "Religionen, Kulturen, Ethik", "description": "Leitung: Christoph Staub", "url": COPS_URL},
+    {"title": "Romanistik", "description": "Leitung: Francisca Ruiz (Spanisch), Letizia Martini (Italienisch), Ariane Chaoui Nowik (Französisch)", "url": COPS_URL}
+]
+
+
 # --- Global Constants & Initialization --------------------------------------
 
 from openai import OpenAI
@@ -94,6 +144,10 @@ app.add_middleware(
     allow_methods=["GET", "POST", "OPTIONS"],
     allow_headers=["*"],
 )
+
+# --- NEU: Globaler Cache für die Admin-Speicherfunktion ---
+LAST_QA_PAIR: Dict = {}
+ADMIN_SAVE_COMMAND = "admin_save_f3a9" # Ihr geheimer Code
 
 
 # --- Utility Functions ------------------------------------------------------
@@ -160,25 +214,52 @@ def call_openai(system_prompt, user_prompt, max_tokens=1200):
 
 
 def summarize_long_text(text, max_length=180):
+    """
+    Zusammenfassen von langem Text. Behebt das 'max_tokens' vs 'max_completion_tokens' Problem.
+    """
     # If short, just return as is
     if not text or len(text) < 200:
-        return text
+        # Wenn der Text kurz ist, nur Zeilenumbrüche entfernen
+        return " ".join(text.splitlines()) 
+        
     prompt = f"Fasse den folgenden Text in zwei Sätzen zusammen:\n{text}"
     try:
+        # 1. VERSUCH: Verwende max_completion_tokens (für 'gpt-5')
         response = openai_client.chat.completions.create(
             model=settings.openai_model,
             messages=[
                 {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
                 {"role": "user", "content": prompt}
             ],
-            max_tokens=max_length,
+            max_completion_tokens=max_length,
             stream=False
         )
         summary = response.choices[0].message.content.strip()
         return summary
     except Exception as e:
+        error_msg = str(e)
+        # 2. FALLBACK: Wenn 'max_completion_tokens' fehlschlägt, versuche 'max_tokens'
+        if 'unsupported parameter' in error_msg.lower() and 'max_tokens' in error_msg.lower():
+            logger.warning(f"Summarize: Model {settings.openai_model} rejected max_completion_tokens. Falling back to max_tokens.")
+            try:
+                response = openai_client.chat.completions.create(
+                    model=settings.openai_model,
+                    messages=[
+                        {"role": "system", "content": "Du bist ein hilfreicher Assistent."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    max_tokens=max_length,
+                    stream=False
+                )
+                summary = response.choices[0].message.content.strip()
+                return summary
+            except Exception as e_fallback:
+                logger.error(f"OpenAI Summarization error (Fallback failed): {repr(e_fallback)}")
+                return text[:max_length] + "..." # Fallback: Text kürzen
+        
+        # Anderer Fehler
         logger.error(f"OpenAI Summarization error: {repr(e)}")
-        return text[:max_length]
+        return text[:max_length] + "..." # Fallback: Text kürzen
 
 def _event_to_date(e: Dict) -> Optional[datetime]:
     """
@@ -269,7 +350,13 @@ def render_workshops_timeline_html(events: List[Dict], title: str = "Kommende Im
     for e in events:
         d = _event_to_date(e)
         date_str = d.strftime("%d.%m.%Y") if d else ""
+        
+        # KORREKTUR: Bereinige den Titel von Datums-Artefakten aus 'build_database.py'
         t = e.get("title", "Ohne Titel")
+        # Entfernt (z.B. " (20. Nov 2025)" oder " (20.11.2025)")
+        t = re.sub(r'\s*\(\s*\d{1,2}\.\s*[A-Za-zäöüÄÖÜ]+\s*\d{0,4}\s*\)$', '', t).strip() 
+        t = re.sub(r'\s*\(\s*\d{1,2}\.\d{1,2}\.\d{2,4}\s*\)$', '', t).strip()
+        
         url = e.get("url") or IMPULS_URL
         place = e.get("place") or ""
         meta = f"<div class='meta'>{place}</div>" if place else ""
@@ -309,8 +396,9 @@ def render_structured_cards_html(items: List[Dict], title: str, source_url: str)
         # Use existing summary if available, otherwise generate one
         item_snippet = item.get("snippet") or summarize_long_text(item_desc) 
         
+        # KORREKTUR (DESIGN): Füge CSS für "Box"-Darstellung hinzu (Abstand/Rahmen)
         cards_html.append(
-            f"<article class='card'>"
+            f"<article class='card' style='margin-bottom: 15px; border: 1px solid #eee; padding: 10px; border-radius: 5px;'>"
             f"<h4><a href='{item_url}' target='_blank'>{item_title}</a></h4>"
             f"<p>{item_snippet}</p>"
             f"</article>"
@@ -337,7 +425,6 @@ def load_chunks(path: str) -> List[Dict]:
         logger.warning(f"⚠️ Unstrukturierte KB nicht gefunden: {p.resolve()}")
         return []
     
-    # (Behält die .jsonl-Logik bei, falls Sie sie später verwenden)
     if p.suffix == ".jsonl":
         with p.open("r", encoding="utf-8") as f:
             for line in f:
@@ -376,6 +463,24 @@ def load_structured_db(path: str) -> Dict:
         logger.error(f"Fehler beim Laden der strukturierten DB: {e}")
         return {}
 
+def load_faq_bin(path: str) -> List[Dict]:
+    """(NEU) Lädt die Admin-kuratierte FAQ-BIN."""
+    p = Path(path)
+    if not p.exists():
+        logger.warning(f"FAQ-Bin ({path}) nicht gefunden. Wird ignoriert.")
+        return []
+    try:
+        with p.open("r", encoding="utf-8") as f:
+            data = json.load(f)
+            if not isinstance(data, list):
+                logger.error(f"FAQ-Bin ({path}) ist keine Liste. Wird ignoriert.")
+                return []
+            logger.info(f"✅ {len(data)} FAQ-Einträge aus {path} geladen.")
+            return data
+    except Exception as e:
+        logger.error(f"Fehler beim Laden der FAQ-Bin: {e}")
+        return []
+
 # Load chunks (für RAG-Fallback)
 CHUNKS: List[Dict] = load_chunks(CHUNKS_PATH)
 CHUNKS_COUNT = len(CHUNKS)
@@ -383,6 +488,9 @@ logger.info(f"✅ {CHUNKS_COUNT} Chunks (für RAG) geladen von {CHUNKS_PATH}")
 
 # Load structured DB (für deterministische Antworten)
 STRUCTURED_DB: Dict = load_structured_db(STRUCTURED_DB_PATH)
+
+# Load FAQ-Bin (für Admin-Antworten)
+FAQ_BIN: List[Dict] = load_faq_bin(FAQ_BIN_PATH)
 
 
 # --- RAG Fallback Functions (Keyword Search & Prompting) ----------------
@@ -411,15 +519,15 @@ def advanced_search(query, max_items=12):
     hits = Counter()
     for token in tokens:
         for idx in KEYWORDINDEX.get(token, []):
-            hits[idx] += 1
+            if idx < len(CHUNKS): # Sicherstellen, dass der Index gültig ist
+                hits[idx] += 1
     best_idxs = [idx for idx, _ in hits.most_common(max_items)]
-    results = [CHUNKS[idx] for idx in best_idxs]
+    results = [CHUNKS[idx] for idx in best_idxs if idx < len(CHUNKS)]
     logger.info(f"Advanced search (RAG) for '{query}': {len(results)} hits")
     return results
 
 def get_ranked_with_sitemap(query: str, max_items: int = 12) -> List[Dict]:
     """Wrapper für die advanced_search, da Sitemap-Logik nicht verwendet wird."""
-    # (Sitemap-Funktionen werden beibehalten, falls sie in Zukunft benötigt werden)
     return advanced_search(query, max_items=max_items)
 
 # --- Sitemap handling (Wird geladen, aber nicht aktiv für die Suche genutzt) ---
@@ -614,38 +722,157 @@ def ensure_clickable_links(answer_html: str) -> str:
         flags=re.IGNORECASE,
     )
 
-# --- Main API Endpoint (Neue Logik) ------------------------------------------------------
+# --- NEU: Admin-Speicherfunktionen ---
+
+def append_to_json_bin(data: Dict, path_str: str):
+    """Hängt ein Q&A-Paar an die FAQ-Bin-Datei an (im 'processed'-Ordner)."""
+    p = Path(path_str)
+    # Stelle sicher, dass der Ordner existiert
+    p.parent.mkdir(parents=True, exist_ok=True)
+    db = []
+    
+    if p.exists():
+        try:
+            with p.open("r", encoding="utf-8") as f:
+                db = json.load(f)
+            if not isinstance(db, list):
+                db = []
+        except json.JSONDecodeError:
+            db = []
+    
+    # Redundanzprüfung (Frage darf noch nicht existieren)
+    if not any(item.get("question") == data.get("question") for item in db):
+        db.append(data)
+        try:
+            with p.open("w", encoding="utf-8") as f:
+                json.dump(db, f, ensure_ascii=False, indent=2)
+            logger.info(f"✅ Eintrag in {path_str} gespeichert.")
+            return True
+        except Exception as e:
+            logger.error(f"Fehler beim Speichern in {path_str}: {e}")
+            return False
+    else:
+        logger.info("Eintrag bereits in FAQ-Bin vorhanden, übersprungen.")
+        return True # Es ist kein Fehler, wenn es bereits existiert
+
+def find_in_faq_cache(query: str, faq_bin: List[Dict]) -> Optional[str]:
+    """Durchsucht die FAQ-Bin nach Keywords."""
+    q_low = query.lower()
+    for item in faq_bin:
+        keywords = item.get("keywords", [])
+        # Prüfe, ob die exakte Frage übereinstimmt ODER ein Keyword passt
+        if q_low == item.get("question", "").lower():
+            logger.info(f"FAQ-Cache-Treffer (Exakt): {q_low}")
+            return item.get("answer_html")
+            
+        for kw in keywords:
+            if kw.lower() in q_low:
+                logger.info(f"FAQ-Cache-Treffer (Keyword: {kw}): {q_low}")
+                return item.get("answer_html")
+    return None
+
+# --- Main API Endpoint (NEUE LOGIK) ------------------------------------------------------
+
+def _normalize_query_for_subjects(q: str) -> List[str]:
+    """Wandelt eine Anfrage wie 'Wirtschaft und Recht' in ['wirtschaft', 'recht'] um."""
+    q = q.lower().replace('ä', 'ae').replace('ö', 'oe').replace('ü', 'ue')
+    q_tokens = re.split(r"[^a-z]+", q)
+    
+    found_subjects = []
+    for token in q_tokens:
+        if token in NORMALIZED_SUBJECT_MAP:
+            found_subjects.append(NORMALIZED_SUBJECT_MAP[token]) # z.B. 'chemie'
+            
+    return found_subjects
 
 @app.post("/ask", response_model=AnswerResponse)
 def ask(req: QuestionRequest):
+    global LAST_QA_PAIR # Wichtig für Admin-Speicher
+    
     try:
-        q_low = (req.question or "").lower()
+        q_raw = req.question.strip()
+        q_low = q_raw.lower()
         
-        # ---- 1. DETERMINISTISCHER HANDLER (NEU) ----
-        # (Verwendet die geladene STRUCTURED_DB)
+        # ---- STUFE 0: ADMIN COMMAND HANDLER (NEU) ----
+        if q_raw == ADMIN_SAVE_COMMAND:
+            if LAST_QA_PAIR:
+                # Speichere das letzte Q&A-Paar
+                success = append_to_json_bin(LAST_QA_PAIR, FAQ_BIN_PATH)
+                if success:
+                    # Lade die FAQ-Bin neu, damit sie sofort verfügbar ist
+                    global FAQ_BIN
+                    FAQ_BIN = load_faq_bin(FAQ_BIN_PATH) 
+                    LAST_QA_PAIR = {} # Zurücksetzen
+                    return AnswerResponse(answer="<p>✅ Antwort wurde in 'faq_bin.json' gespeichert und Cache neu geladen.</p>", sources=[])
+                else:
+                    return AnswerResponse(answer="<p>❌ Fehler: Antwort konnte nicht gespeichert werden (Datei-Problem).</p>", sources=[])
+            else:
+                return AnswerResponse(answer="<p>❌ Fehler: Nichts im Speicher zum Speichern.</p>", sources=[])
+        
+        # ---- STUFE 1: FAQ CACHE (NEU) ----
+        cached_answer = find_in_faq_cache(q_low, FAQ_BIN)
+        if cached_answer:
+            # Wir müssen die Quellen aus dem HTML extrahieren, um sie im Frontend anzuzeigen
+            # (Diese Logik kann vereinfacht werden, wenn die Quellen-Struktur immer gleich ist)
+            sources = [] 
+            try:
+                soup = BeautifulSoup(cached_answer, 'html.parser')
+                for a in soup.select(".sources li a"):
+                    sources.append(SourceItem(title=a.get_text(strip=True), url=a.get('href', '#')))
+            except Exception:
+                pass # Keine Quellen gefunden im Cache
+                
+            LAST_QA_PAIR = {} # Admin-Speicher zurücksetzen
+            return AnswerResponse(answer=cached_answer, sources=sources)
+        
+        
+        # ---- STUFE 2: DETERMINISTISCHER HANDLER (STRUCTURED_DB) ----
 
-        # KORREKTUR: Robuste Prüfung, ob die DB ein Dictionary ist, bevor wir .get() verwenden
         if not isinstance(STRUCTURED_DB, dict):
-            logger.error("STRUCTURED_DB ist keine Dict. Ladefehler? Fallback zu RAG.")
-            # Springe direkt zum RAG-Fallback, wenn die DB kaputt ist
-            return rag_fallback(req, q_low)
+            logger.error("STRUCTURED_DB ist keine Dict oder nicht geladen. Ladefehler? Fallback zu RAG.")
+            return rag_fallback(req, q_low) # Springe zum RAG-Fallback
 
-        # 1a. Innovationsfonds Projects (Direct Python Rendering)
+        # 2a. Innovationsfonds Projects (Direct Python Rendering)
         if any(k in q_low for k in ["innovationsfonds", "projekte", "innovation"]):
-            projects = STRUCTURED_DB.get("innovationsfonds_projects", [])
-            if projects:
-                html_answer = render_structured_cards_html(
-                    projects, 
-                    title="DLH Innovationsfonds Projekte", 
-                    source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
-                )
-                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects[:req.max_sources or 4]]
-                return AnswerResponse(
-                    answer=html_answer,
-                    sources=returned_sources
-                )
+            
+            all_projects = STRUCTURED_DB.get("innovationsfonds_projects", [])
+            projects_to_show = all_projects
+            title = "Alle DLH Innovationsfonds Projekte"
+            
+            # KORREKTUR: Filterung nach Fach
+            subjects_in_query_keys = _normalize_query_for_subjects(q_low)
+            
+            if subjects_in_query_keys:
+                logger.info(f"Filtere Innovationsfonds nach Fächern: {subjects_in_query_keys}")
+                filtered_projects = []
+                for proj in all_projects:
+                    # Prüfe, ob eines der gesuchten Fächer in den Fächern des Projekts enthalten ist
+                    if any(subj_key in proj.get('subjects', []) for subj_key in subjects_in_query_keys):
+                        filtered_projects.append(proj)
+                
+                if filtered_projects:
+                    projects_to_show = filtered_projects
+                    subject_names = [SUBJECT_MAP.get(key, key) for key in subjects_in_query_keys]
+                    title = f"Innovationsfonds Projekte (Filter: {', '.join(subject_names)})"
+                else:
+                    projects_to_show = [] 
+                    subject_names = [SUBJECT_MAP.get(key, key) for key in subjects_in_query_keys]
+                    title = f"Innovationsfonds Projekte (Keine Treffer für: {', '.join(subject_names)})"
+            
+            html_answer = render_structured_cards_html(
+                projects_to_show, 
+                title=title, 
+                source_url="https://dlh.zh.ch/home/innovationsfonds/projektvorstellungen/uebersicht"
+            )
+            returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in projects_to_show[:req.max_sources or 4]]
+            
+            LAST_QA_PAIR = {"question": q_raw, "answer_html": html_answer} # Für Admin-Speicher
+            return AnswerResponse(
+                answer=html_answer,
+                sources=returned_sources
+            )
         
-        # 1b. Fobizz Resources (Direct Python Rendering)
+        # 2b. Fobizz Resources (Direct Python Rendering)
         if any(k in q_low for k in ["fobizz", "tool", "sprechstunde", "kurs", "weiterbildung"]):
             fobizz_items = STRUCTURED_DB.get("fobizz_resources", [])
             if fobizz_items:
@@ -655,12 +882,31 @@ def ask(req: QuestionRequest):
                     source_url="https://dlh.zh.ch/home/wb-kompass/wb-angebote/1007-wb-plattformen"
                 )
                 returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in fobizz_items[:req.max_sources or 4]]
+                
+                LAST_QA_PAIR = {"question": q_raw, "answer_html": html_answer} # Für Admin-Speicher
+                return AnswerResponse(
+                    answer=html_answer,
+                    sources=returned_sources
+                )
+        
+        # 2c. CoPs (Communities of Practice) (Hardcoded DB)
+        if any(k in q_low for k in ["cops", "communities of practice", "community"]):
+            cops_items = COPS_HARDCODED_DB # Greife auf die hardcodierte Liste zu
+            if cops_items:
+                html_answer = render_structured_cards_html(
+                    cops_items, 
+                    title="DLH Communities of Practice (CoPs)", 
+                    source_url="https://dlh.zh.ch/home/cops"
+                )
+                returned_sources = [SourceItem(title=p['title'], url=p['url']) for p in cops_items[:req.max_sources or 4]]
+                
+                LAST_QA_PAIR = {"question": q_raw, "answer_html": html_answer} # Für Admin-Speicher
                 return AnswerResponse(
                     answer=html_answer,
                     sources=returned_sources
                 )
 
-        # 1c. WORKSHOP INTENT (Time-sensitive, aus DB)
+        # 2d. WORKSHOP INTENT (Time-sensitive, aus DB)
         if any(k in q_low for k in ["impuls", "workshop", "workshops", "termine"]):
             
             def _norm(s: str) -> str:
@@ -679,7 +925,6 @@ def ask(req: QuestionRequest):
             
             if all_events:
                 today = datetime.now(timezone.utc).date()
-                # Filtern der Events (benötigt _d, das beim Laden der DB erstellt wurde)
                 future_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() >= today]
                 past_chunk_events = [e for e in all_events if e.get("_d") and e["_d"].date() < today]
 
@@ -700,7 +945,8 @@ def ask(req: QuestionRequest):
                     events_to_show, 
                     title=("Nächster Impuls-Workshop" if want_next else "Kommende Impuls-Workshops") + title_suffix
                 )
-
+                
+                LAST_QA_PAIR = {"question": q_raw, "answer_html": html}
                 return AnswerResponse(
                     answer=html,
                     sources=[SourceItem(title=e['title'], url=e['url']) for e in events_to_show if 'title' in e and 'url' in e] 
@@ -730,11 +976,15 @@ def ask(req: QuestionRequest):
                 future_sorted = sorted(future, key=lambda x: x["_d"])
                 html = render_workshops_timeline_html(future_sorted, title="Kommende Impuls-Workshops (Live)")
             
+            LAST_QA_PAIR = {"question": q_raw, "answer_html": html}
             return AnswerResponse(answer=html, sources=[SourceItem(title="Impuls-Workshop-Übersicht", url=IMPULS_URL)])
             
 
         # ---- 3. DEFAULT LLM/RAG BRANCH (General Concepts, Definitions, etc.) ----
-        return rag_fallback(req, q_low)
+        response = rag_fallback(req, q_low)
+        # Speichere die RAG-Antwort, falls der Admin sie behalten will
+        LAST_QA_PAIR = {"question": q_raw, "answer_html": response.answer}
+        return response
 
     except Exception as e:
         msg = "Entschuldigung, es gab einen technischen Fehler. Bitte versuchen Sie es später erneut."
@@ -802,7 +1052,7 @@ def debug_faq(subject: str):
     
     def get_subject_faq(subject, max_items=10):
         idxs = SUBJECTINDEX.get(subject.lower(), [])
-        return [CHUNKS[i] for i in idxs][:max_items]
+        return [CHUNKS[i] for i in idxs if i < len(CHUNKS)] # Sicherstellen, dass der Index gültig ist
 
     faqs = get_subject_faq(subject)
     arts = []
@@ -836,11 +1086,16 @@ def debug_sitemap():
 
 @app.get("/_kb")
 def kb_info():
+    db_status = "OK"
+    if not isinstance(STRUCTURED_DB, dict) or not STRUCTURED_DB:
+        db_status = "FEHLER: structured_db.json nicht gefunden oder leer."
+
     return {
         "ok": True, 
-        "chunks_loaded": CHUNKS_COUNT, 
+        "chunks_loaded (RAG)": CHUNKS_COUNT, 
         "path": str(settings.chunks_path),
-        "structured_db_loaded": bool(STRUCTURED_DB)
+        "structured_db_status": db_status,
+        "faq_bin_loaded": len(FAQ_BIN)
     }
 
 @app.get("/debug/impuls")
@@ -878,6 +1133,7 @@ def health():
         "status": "healthy",
         "chunks_loaded (RAG)": CHUNKS_COUNT,
         "structured_db_status": db_status,
+        "faq_bin_loaded": len(FAQ_BIN),
         "model": settings.openai_model
     }
 
